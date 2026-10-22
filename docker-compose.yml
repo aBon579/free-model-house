@@ -5,7 +5,9 @@
 
 services:
   fmh:
-    image: ghcr.io/aBon579/free-model-house:latest
+    # ⚠️ **必须全小写** —— Docker 镜像引用不接受大写字母，
+    #   写成 aBon579 会直接报 invalid reference format。
+    image: ghcr.io/abon579/free-model-house:latest
     build:
       context: .
       dockerfile: Dockerfile

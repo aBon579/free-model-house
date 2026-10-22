@@ -11,7 +11,7 @@ docker compose up -d
 镜像地址：
 
 ```
-ghcr.io/aBon579/free-model-house:latest
+ghcr.io/abon579/free-model-house:latest
 ```
 
 ## 这是什么
