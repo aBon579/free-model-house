@@ -1,0 +1,77 @@
+MIT License
+
+Copyright (c) 2026 Free Model House contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+## 第三方组件与来源声明
+
+### OpenCode（MIT）
+
+本项目的 `internal/lane/zen_fingerprint.go` 中包含 OpenCode 官方客户端的
+**工具定义字符串**（`read` / `shell` 的 `description` 及其参数 schema）。
+
+来源：
+
+```
+OpenCode
+Copyright (c) 2025 opencode
+https://github.com/sst/opencode
+  packages/core/src/tool/plugin/read.ts
+  packages/core/src/tool/plugin/shell.ts
+```
+
+这些字符串**必须逐字一致** —— OpenCode Zen 的免费车道会逐字比对它们，
+改一个词就返回 `403 FreeTierError`。
+
+按 MIT 许可，上游项目的版权声明与许可声明一并保留在此。
+本项目对这部分内容的改动仅限于：**将官方运行时拼接的描述固化为静态常量**，
+并补上 FMH 自己的实测结论（端点分流、会话 ID 编码、`tool_choice` 限制）。
+
+### Go 依赖
+
+| 依赖 | 许可 |
+|---|---|
+| `github.com/ncruces/go-sqlite3` | MIT |
+| `golang.org/x/crypto` | BSD-3-Clause |
+| `golang.org/x/sys` | BSD-3-Clause |
+
+完整副本见 `vendor/`。
+
+### 前端依赖
+
+React、TypeScript、Vite、Tailwind CSS 等 —— 各自许可见
+`web/package.json` 与 `web/node_modules`（构建产物不随本仓库分发）。
+
+---
+
+## 使用前请先读
+
+免密车道的上游对客户端有身份限制。本项目通过复现官方客户端的**线上行为**
+来满足它 —— 这是一个**灰区**，上游随时可能收紧。
+
+- 请自行判断你的使用是否符合上游服务条款
+- 不要用它处理密码、密钥、个人身份信息或商业机密
+- 上游的 prompt **可能被记录**
+- FMH 与任何上游厂商无隶属或背书关系
+
+详见 [`docs/design/05-what-we-fake.md`](docs/design/05-what-we-fake.md)
+与 README §7。

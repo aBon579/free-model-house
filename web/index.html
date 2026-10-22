@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="description" content="Free Model House —— 局域网免费模型聚合网关" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <title>Free Model House</title>
+    <script>
+      // ⚠️ 在首屏渲染前定好主题 —— 否则会闪一下白。
+      // ⚠️ 存的是**偏好**（system/light/dark），不是解析结果 ——
+      //   这样"跟随系统"才能在系统主题变化时继续跟随。
+      (function () {
+        var stored = localStorage.getItem('fmh-theme')
+        var pref =
+          stored === 'light' || stored === 'dark' || stored === 'system'
+            ? stored
+            : 'system'
+        var dark = window.matchMedia('(prefers-color-scheme: dark)').matches
+        document.documentElement.dataset.theme =
+          pref === 'system' ? (dark ? 'dark' : 'light') : pref
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

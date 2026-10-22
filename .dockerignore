@@ -1,0 +1,27 @@
+# 多阶段构建（Dockerfile）用这份 —— dist/ 是预编译产物，构建时不需要。
+
+# 构建产物（镜像里重新生成）
+/dist
+/fmh
+/web/dist
+/internal/server/web/dist
+
+# 依赖与缓存
+/web/node_modules
+*.tsbuildinfo
+*.exe
+
+# 运行时数据
+/data
+*.db
+*.db-wal
+*.db-shm
+.secret-key
+.env
+
+# 开发
+*.log
+.DS_Store
+.idea/
+.vscode/
+.git/

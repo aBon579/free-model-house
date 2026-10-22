@@ -1,0 +1,58 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Free Model House —— .gitignore
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── 构建产物 ──
+/fmh
+/fmh.exe
+*.exe
+/dist
+
+# ── 本地部署与打包（不进开源仓库）──
+# 这些脚本绑定了本机路径 / 私有部署包，对开源用户没有意义。
+/Dockerfile.offline
+/Dockerfile.offline.dockerignore
+/docker-compose.offline.yml
+/deploy.sh
+/scripts/package.py
+/scripts/package.sh
+/scripts/package-linux.sh
+/tools/sync-upload.py
+/docs/operations/部署到NAS.md
+
+# ── 一次性的重构/审计脚本 ──
+/tools/trim-comments.py
+/tools/trim-fields.py
+/tools/find-dup-comments.py
+
+# `internal/server/web/dist` 是 go:embed 的输入，但里面的产物是 vite 生成的。
+# 只保留占位文件，让没装 Node 的人也能 `go build`。
+/internal/server/web/dist/*
+!/internal/server/web/dist/.keep
+
+/web/dist
+
+# ── 依赖 ──
+/web/node_modules
+
+# ⚠️ **vendor/ 要提交** —— Dockerfile 用它离线构建。
+#   改了依赖后重新生成：`go mod tidy && go mod vendor`
+
+# ── TypeScript 增量构建缓存 ──
+*.tsbuildinfo
+
+# ── 运行时数据 ──
+#
+# ⚠️ 这里面有**密封的上游凭据**（AES-256-GCM 密文）
+#   和**局域网推理 Key** —— 绝对不能提交。
+/data
+*.db
+*.db-wal
+*.db-shm
+.secret-key
+
+# ── 开发 ──
+*.log
+.DS_Store
+.idea/
+.vscode/

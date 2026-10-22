@@ -1,0 +1,14 @@
+# 统一换行符 —— 否则 Windows 上提交的 CRLF 会让 Linux/CI 上的脚本直接失败。
+* text=auto eol=lf
+
+# 脚本必须 LF，不然 shebang 匹配不上。
+*.sh text eol=lf
+
+# Windows 批处理保持 CRLF。
+*.bat text eol=crlf
+
+# 二进制文件不做换行转换。
+*.png binary
+*.ico binary
+*.jpg binary
+*.webp binary

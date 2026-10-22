@@ -1,0 +1,137 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+# 同一分支的新 push 会取消上一个 —— 不用排队等旧结果。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: Go (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [linux, darwin, windows]
+        goarch: [amd64, arm64]
+        include:
+          - goos: linux
+            goarch: arm64
+            goarch_tag: v8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+          cache-dependency-path: go.sum
+
+      # ⚠️ **前端必须先构建** —— 它被 go:embed 打进二进制，
+      #    没有它 `go build` 会报 "pattern web/dist: no matching files found"。
+      - name: 构建前端
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - name: gofmt
+        run: |
+          # ⚠️ **只看我们自己的代码** —— vendor/ 是第三方的，
+          #    对它跑 gofmt 会产生噪音。
+          out=$(gofmt -l $(find . -name '*.go' -not -path './vendor/*'))
+          if [ -n "$out" ]; then
+            echo "这些文件没格式化："
+            echo "$out"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test -race -count=1 ./...
+
+      - name: 构建
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          # ⚠️ **-trimpath 不能省** ——
+          #    不加的话二进制里会嵌编译机的绝对路径，
+          #    某些环境下（包括 Windows Defender）会误判成木马。
+          go build -trimpath -ldflags="-s -w" -o /tmp/fmh ./cmd/fmh
+
+  vendor:
+    name: vendor 一致性
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+
+      # ⚠️ **vendor/ 必须跟 go.mod 一致** ——
+      #    NAS 上是离线构建，不一致会直接构建失败。
+      - name: 校验 vendor
+        run: |
+          go mod verify
+          go build -mod=vendor ./cmd/fmh
+
+  frontend:
+    name: 前端
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - run: npm ci
+
+      - name: 类型检查
+        run: npx tsc --noEmit
+
+      - name: 构建
+        run: npm run build
+
+  docker:
+    name: Docker 镜像
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Dockerfile 是自包含的多阶段构建，不需要预编译 dist/。
+      - name: 构建镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: false
+          load: true
+          tags: fmh:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # 冒烟测试：二进制能起来、能打印版本。
+      - name: 冒烟测试
+        run: docker run --rm fmh:ci version
