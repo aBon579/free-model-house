@@ -1,0 +1,30 @@
+# Free Model House
+#
+#   docker compose up -d              → 拉取预构建镜像（推荐）
+#   docker compose up -d --build      → 本地构建
+
+services:
+  fmh:
+    image: ghcr.io/aBon579/free-model-house:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: free-model-house
+    restart: unless-stopped
+    ports:
+      - "8678:8678"
+    volumes:
+      - ./data:/data
+    environment:
+      FMH_ADDR: "${FMH_ADDR:-:8678}"
+      FMH_DATA: "${FMH_DATA:-/data}"
+      FMH_SECRET_KEY: "${FMH_SECRET_KEY:-}"
+      FMH_HIDE_KEYS: "${FMH_HIDE_KEYS:-0}"
+      TZ: "${TZ:-Asia/Shanghai}"
+    # ⚠️ 必须限制日志体积 —— 默认 json-file 驱动**不封顶**，
+    #   常驻 NAS 跑几周就能把磁盘写满。
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

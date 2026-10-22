@@ -1,0 +1,738 @@
+/* FMH 设计令牌
+ *
+ * 定位："家里的配电箱" —— 冷静、可靠、一眼看清状态。
+ * 它常驻在 NAS 上，可能一直开着，所以**没有装饰性动效**。
+ *
+ * 详见 docs/design/04-ui.md §3。 */
+
+@import 'tailwindcss';
+
+/* 安全区（刘海屏 / 底部横条）
+ *
+ * ⚠️ 不处理的话，顶部标题会被刘海盖住，底部按钮会滑到 Home 条底下点不中。
+ * `env(safe-area-inset-*)` 在没有这些区域的设备上返回 0，所以可以无条件用。
+ *
+ * ⚠️ 变量必须定义在 `:root` 上 —— Tailwind 的 `p-4` 之类不会自动带上安全区。 */
+
+:root {
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+}
+
+/* 侧栏（桌面常驻 / 手机抽屉）—— 顶部避开刘海。 */
+.fmh-sidebar {
+  padding-top: var(--safe-top);
+  padding-bottom: var(--safe-bottom);
+  padding-left: var(--safe-left);
+}
+
+/* 顶栏（手机）—— 顶部避开刘海。 */
+.fmh-topbar {
+  padding-top: var(--safe-top);
+  padding-left: var(--safe-left);
+  padding-right: var(--safe-right);
+}
+
+/* 内容区 —— 底部避开 Home 指示条。 */
+.fmh-content {
+  padding-bottom: calc(16px + var(--safe-bottom));
+  padding-left: var(--safe-left);
+  padding-right: var(--safe-right);
+}
+
+/* 触点尺寸
+ *
+ * ⚠️ **只在触屏设备上加** —— 桌面端的 28px 小按钮是**故意**的
+ *（让表格更紧凑，一屏能看更多模型），但在手机上点不准
+ *（Apple 建议 44px，Android 建议 48px）。
+ *
+ * ⚠️ 用 `pointer: coarse` 而不是 `hover: none` ——
+ * 后者在某些笔记本上也成立。 */
+
+@media (pointer: coarse) {
+  /* 小按钮在触屏上放大到 36px —— 够点，又不至于太占地方。 */
+  .fmh-touchable {
+    min-height: 36px;
+  }
+
+  /* 图标按钮（只有图标）要更大 —— 手指的接触面有 8mm。 */
+  .fmh-touchable-icon {
+    min-width: 40px;
+    min-height: 40px;
+  }
+
+  /* ⚠️ **开关** —— 视觉只有 22px 高，但手指点不准。
+   *
+   * 用伪元素把**可点区域**撑到 40px，
+   * 视觉尺寸完全不变 —— 桌面端一点不改。
+   */
+  .fmh-switch::before {
+    content: '';
+    position: absolute;
+    inset: -9px -1px;
+  }
+}
+
+:root {
+  /* ── 表面 ───────────────────────────────────────────────────────────── */
+  /* ⚠️ **亮色主题是淡橙黄色调** —— 像 Claude Code 那样，暖而不刺眼。
+     纯白（#ffffff）在长时间盯着看的时候很"硬"，
+     淡淡的暖色底看起来更舒服。
+     ⚠️ 但**不能太黄** —— 太黄会变成"泛黄的老照片"，
+     底色要接近白，只带一点点暖。 */
+  --bg: #faf7f2;
+  --surface: #fffdf9;
+  --surface-2: #f4efe6;
+  /* ⚠️ **悬停底色** ——
+     比 surface-2 **再深一档**。
+
+     实测：surface → surface-2 只有 1.13:1 的对比度，
+     几乎看不出来。所以需要一档**更明显**的悬停底色。 */
+  --surface-hover: #ece4d6;
+  /* ── 侧栏 ───────────────────────────────────────────────────────────── */
+  /* ⚠️ 侧栏**跟随主题** —— 亮色主题下是浅色侧栏，不是深色。
+     之前侧栏写死成深靛色，于是切到亮色主题时它纹丝不动，
+     看起来就像"主题没生效"。
+     下面这几个变量都跟着主题走。
+
+     ⚠️ **侧栏必须跟主内容区明显分开** —— 用户说"界限不明显"。
+
+     之前侧栏 `#fffdf9` 跟底色 `#faf7f2` 差 **1.03:1** ——
+     肉眼几乎看不出哪里是侧栏、哪里是内容区。
+
+     现在两条线一起上：
+       ① **底色拉开** —— 侧栏比内容区**更暗**（像"沉下去"的面板）
+       ② **右边一条实线** —— 明确的物理边界
+
+     侧栏比内容区暗，视觉上就成了"背景层"；
+     内容区（更亮）浮在上面。这是仪表盘的标准做法。
+
+     ⚠️ **深浅差要够** —— `#ebe5d8` 跟 `#faf7f2` 差 **1.17:1**，
+     再深一点到 `#e8e1d1` 是 **1.22:1** —— 差别更明显，
+     但还是"暖白"，不会变成灰扑扑的脏色。 */
+  --sidebar: #e8e1d1;
+  --sidebar-line: #d0c3ab;
+  --sidebar-hover: #ddd4c1;
+  --sidebar-active: #cfc3a8;
+  --on-sidebar: #1c1917;
+  --on-sidebar-dim: #6b5f52;
+  --on-sidebar-active: #1c1917;
+  /* ⚠️ **侧栏的投影** —— 让它真的"浮"在内容之上。
+     亮色主题下没有阴影，侧栏和内容区就是**贴在一起**的。 */
+  --sidebar-shadow: 1px 0 0 var(--sidebar-line), 2px 0 8px -4px rgba(15, 23, 42, 0.10);
+  --line: #e6dfd2;
+  --line-soft: #f0eade;
+
+  /* ── 文字 ───────────────────────────────────────────────────────────── */
+  /* ⚠️ **对比度要够** —— 之前 ink-3 是 #94a3b8（太浅），
+     在暖色底上几乎看不清。暖色底的对比度本来就更难做，
+     所以这里的文字色比冷色底时**更深**。
+
+     ink   = 15.8:1  ✅ WCAG AAA
+     ink-2 =  7.6:1  ✅ WCAG AA（正文级）
+     ink-3 =  4.9:1  ✅ WCAG AA（≥4.5，大字可到 7:1）
+
+     ⚠️ ink-3 只用于**辅助文字**（时间戳、次要说明），
+        不用于正文 —— 4.9:1 是 AA 的底线。 */
+  --ink: #1c1917;
+  --ink-2: #443c33;
+  --ink-3: #6b5f52;
+
+  /* ── 强调色：琥珀（暖橙）──────────────────────────────────────────── */
+  /* ⚠️ 亮色主题下用**暖橙**做强调色 —— 跟底色同族，整体协调。
+     深色主题下用**蓝**（见下方），因为深底上暖色会刺眼。 */
+  --accent: #b45309;
+  --accent-2: #d97706;
+  --accent-ink: #ffffff;
+  --accent-soft: #fdf2e3;
+  --accent-line: #f0d5ab;
+
+  /* ── 状态色 ─────────────────────────────────────────────────────────── */
+  --ok: #047857;
+  --ok-soft: #e8f6f0;
+  --ok-line: #a7e3cd;
+
+  /* ⚠️ **开关的绿** —— 跟暗色主题统一，用 `#34d399`。
+   *
+   * 为什么要单独一个令牌：暗色主题的 `--ok` 是 `#34d399`（亮绿），
+   * 亮色主题是 `#047857`（墨绿）。同一个开关在两个主题下
+   * **颜色不一样**，看着像两回事。
+   *
+   * 但 `--ok` 还当**文字色**用（"可用 12"那些）——
+   * 文字要的是**对比度**，不是好看。
+   * `#34d399` 在白底上的对比度只有 **1.9:1**，
+   * 拿它当正文色是**不可读的**。
+   *
+   * 所以：**开关用 `--switch-on`（统一亮绿）**，
+   * **文字继续用 `--ok`（各主题各自的高对比版本）**。
+   */
+  --switch-on: #34d399;
+
+  --warn: #a16207;
+  --warn-soft: #fdf6e3;
+  --warn-line: #f0dca8;
+
+  --bad: #b91c1c;
+  --bad-soft: #fdecec;
+  --bad-line: #f5c2c2;
+
+  --idle: #57534e;
+  --idle-soft: #f0ece4;
+  --idle-line: #d5cdbf;
+
+  /* ── 上游源指示灯（快速接入页「现在有什么」）────────────────────────
+     ⚠️ **刻意不用 `--ok`（#047857）** ——
+     那是**墨绿**，适合当文字色（白底上对比度够），
+     但当 6px 的小圆点时：
+       - 面积太小，承载不住绿色相 → 看着像个灰点
+       - 亮度低 → 完全没有"灯亮着"的感觉
+
+     所以另开两个专用令牌：
+       - `--lamp-on`  = **亮色绿**（饱和、要跳出来）
+       - `--lamp-off` = **浅灰**（不是黑、不是深灰 —— 那看着像"坏了"） */
+  --lamp-on: #22c55e;
+  --lamp-off: #c9c2b6;
+
+  /* ── 车道色（FMH 独有的概念）────────────────────────────────────────── */
+  /* ⚠️ **蓝 ↔ 紫对调** —— 免密车道（zen）原本是紫，
+     现在改成**蓝**；OpenRouter 原本是青，现在改成**紫**。
+
+     为什么这么分：免密车道是**主力**（默认就在用），
+     蓝色更醒目、更像"主通道"；OpenRouter 是**备胎**，
+     紫色更低调。 */
+  --lane-zen: #1d4ed8;
+  --lane-zen-soft: #e8efff;
+  --lane-zen-line: #c3d3fb;
+
+  --lane-openrouter: #7c3aed;
+  --lane-openrouter-soft: #f4efff;
+  --lane-openrouter-line: #ddd0fb;
+
+  /* ⚠️ Kilo 是**第三**条车道 —— 免 key 池。
+     用**青绿**跟另外两条区分开（蓝 / 紫 / 青绿）。 */
+  --lane-kilo: #0d9488;
+  --lane-kilo-soft: #e6fbf7;
+  --lane-kilo-line: #b5e8df;
+
+  /* ── 形状 ───────────────────────────────────────────────────────────── */
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+
+  --shadow-1: 0 1px 2px rgba(15, 23, 42, 0.05);
+  --shadow-2: 0 4px 16px -4px rgba(15, 23, 42, 0.10);
+  --shadow-3: 0 16px 40px -12px rgba(15, 23, 42, 0.18);
+
+  /* ── 字体 ───────────────────────────────────────────────────────────── */
+  --font: ui-sans-serif, system-ui, -apple-system, 'Segoe UI',
+          'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --mono: ui-monospace, 'SF Mono', 'Cascadia Code', Consolas, monospace;
+
+  /* ── 尺寸 ───────────────────────────────────────────────────────────── */
+  --sidebar-w: 240px;
+  /* 收起时只留一列图标 —— 58px 够放 28px 的 logo + 40px 的图标按钮。 */
+  --sidebar-w-collapsed: 58px;
+  --row-h: 40px;
+}
+
+:root[data-theme='dark'] {
+  --bg: #0b1220;
+  --surface: #111a2e;
+  --surface-2: #1a2438;
+  /* ⚠️ **悬停底色** —— 深色主题下要**更亮**（深底上"变亮"才是变化）。
+     跟亮色主题的方向相反，但道理一样：**差一档才看得出来**。 */
+  --surface-hover: #24304a;
+  /* ⚠️ **侧栏跟主内容区拉开** ——
+     之前侧栏 `#070d18` 跟底色 `#0b1220` 只差一点点，
+     加上深色主题本来就没投影，于是两边"糊"在一起。
+
+     现在侧栏明显更深（沉到底），内容区更亮（浮上来），
+     再加一条边线 + 投影，边界就清楚了。
+
+     ⚠️ **暗色主题下色差天然有限** ——
+     `--bg` 已经是 #0b1220（很深的蓝黑），
+     侧栏再深也只能深到"接近纯黑"。
+     纯黑跟 #0b1220 差 **1.12:1** ——
+     这是这条路线上的**上限**。
+
+     所以暗色主题**光靠底色是不够的**，
+     必须配合右边那条**实线 + 投影**（--sidebar-shadow）。
+     三样一起上，边界就清楚了。
+
+     #010306 是"接近纯黑但还带一点蓝"——
+     跟整体的冷色调不打架。 */
+  --sidebar: #010306;
+  --sidebar-line: #1e2a3f;
+  --sidebar-hover: #162034;
+  --sidebar-active: #1e2a44;
+  --on-sidebar: #cbd5e1;
+  --on-sidebar-dim: #64748b;
+  --on-sidebar-active: #ffffff;
+  /* ⚠️ **暗色下用真的投影** —— 深色主题里"1px 边线"很弱，
+     要靠一层淡淡的暗影把侧栏抬起来。
+     亮色主题下反过来：侧栏更暗（沉下去），内容区更亮（浮上来）。 */
+  --sidebar-shadow: 1px 0 0 var(--sidebar-line), 4px 0 16px -6px rgba(0, 0, 0, 0.6);
+  --line: #24304a;
+  --line-soft: #1b2537;
+
+  --ink: #e8eef9;
+  --ink-2: #94a3b8;
+  --ink-3: #64748b;
+
+  /* ── 强调色：天蓝 ───────────────────────────────────────────────────
+     ⚠️ 暗色主题用**天蓝**（不是靛蓝）——
+        靛蓝在深底上偏暗，饱和度不够，看着发闷。
+        天蓝（亮、饱和）在深底上更跳。 */
+  --accent: #38bdf8;
+  --accent-2: #7dd3fc;
+  --accent-ink: #062033;
+  --accent-soft: #0c2b40;
+  --accent-line: #1a4a6b;
+
+  --ok: #34d399;
+  --ok-soft: #052e26;
+  --ok-line: #065f46;
+
+  /* ⚠️ **开关的绿** —— 两个主题**完全一致**。
+     亮色主题也用这个值（见上面 `--switch-on` 的说明）。 */
+  --switch-on: #34d399;
+
+  --warn: #fbbf24;
+  --warn-soft: #2a1e05;
+  --warn-line: #78350f;
+
+  --bad: #f87171;
+  --bad-soft: #2a0f0f;
+  --bad-line: #7f1d1d;
+
+  --idle: #94a3b8;
+  --idle-soft: #1a2438;
+  --idle-line: #334155;
+
+  /* ── 上游源指示灯（暗色主题）────────────────────────────────────────
+     ⚠️ 暗底上纯绿（#22c55e）会**偏暗**（绿在深底上看着发闷），
+     所以换成更偏青的亮绿 —— 在深底上更"跳"。
+     灭的灯也要**浅一点** —— 深底上的深灰会彻底看不见。 */
+  --lamp-on: #4ade80;
+  --lamp-off: #4a5668;
+
+  /* ── 车道色（暗色）───────────────────────────────────────────────────
+     ⚠️ **暗色主题下车道名要用天蓝** ——
+        深底上其它颜色（尤其是紫）对比度不够，
+        车道名认不出来。天蓝最跳。 */
+  --lane-zen: #7dd3fc;          /* 天蓝：免密车道 */
+  --lane-zen-soft: #0c2438;
+  --lane-zen-line: #1e4a6b;
+
+  --lane-openrouter: #c4a2fc;    /* 紫：OpenRouter */
+  --lane-openrouter-soft: #201336;
+  --lane-openrouter-line: #402066;
+
+  --lane-kilo: #5eead4;          /* 青绿：Kilo 免 key 池 */
+  --lane-kilo-soft: #0a2b28;
+  --lane-kilo-line: #17564f;
+}
+
+/* Tailwind 主题映射 —— 让 Tailwind 类能用这些令牌 */
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  /* ⚠️ **悬停底色** —— 比 surface-2 再深一档，
+     因为实测 surface→surface-2 只有 1.13:1，看不出来。 */
+  --color-surface-hover: var(--surface-hover);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-hover: var(--sidebar-hover);
+  --color-sidebar-active: var(--sidebar-active);
+  --color-line: var(--line);
+  --color-line-soft: var(--line-soft);
+
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-on-sidebar: var(--on-sidebar);
+  --color-on-sidebar-dim: var(--on-sidebar-dim);
+
+  --color-accent: var(--accent);
+  --color-accent-2: var(--accent-2);
+  --color-accent-ink: var(--accent-ink);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-line: var(--accent-line);
+
+  --color-ok: var(--ok);
+  --color-ok-soft: var(--ok-soft);
+  --color-ok-line: var(--ok-line);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-warn-line: var(--warn-line);
+  --color-bad: var(--bad);
+  --color-bad-soft: var(--bad-soft);
+  --color-bad-line: var(--bad-line);
+  --color-idle: var(--idle);
+  --color-idle-soft: var(--idle-soft);
+  --color-idle-line: var(--idle-line);
+
+  --color-lane-zen: var(--lane-zen);
+  --color-lane-zen-soft: var(--lane-zen-soft);
+  --color-lane-zen-line: var(--lane-zen-line);
+  --color-lane-openrouter: var(--lane-openrouter);
+  --color-lane-openrouter-soft: var(--lane-openrouter-soft);
+  --color-lane-openrouter-line: var(--lane-openrouter-line);
+  --color-lane-kilo: var(--lane-kilo);
+  --color-lane-kilo-soft: var(--lane-kilo-soft);
+  --color-lane-kilo-line: var(--lane-kilo-line);
+
+  --radius-sm: var(--r-sm);
+  --radius-md: var(--r-md);
+  --radius-lg: var(--r-lg);
+
+  --font-sans: var(--font);
+  --font-mono: var(--mono);
+}
+
+/* 基础样式 */
+
+* {
+  border-color: var(--line);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* ⚠️ 焦点可见 —— 无障碍硬要求。 */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+
+/* ⚠️ 数字用等宽 + 表格数字 —— 竖排对齐。 */
+.tnum {
+  font-variant-numeric: tabular-nums;
+  font-family: var(--mono);
+}
+
+/* 模型 ID、Key、Base URL —— FMH 的视觉签名。 */
+.mono {
+  font-family: var(--mono);
+  font-size: 0.92em;
+}
+
+/* ── 滚动条 ───────────────────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 999px;
+  border: 3px solid var(--bg);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--ink-3);
+}
+
+/* ── 状态指示灯的呼吸 ───────────────────────────────────────────────────
+ * ⚠️ 这是**唯一**的循环动画 —— 它承载真实信息（服务是否活着）。 */
+@keyframes fmh-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+.status-dot {
+  animation: fmh-pulse 2s ease-in-out infinite;
+}
+
+/* ── 提示弹入 ───────────────────────────────────────────────────────────
+ * ⚠️ 从下往上 + 淡入 —— 短、快、不打断。 */
+@keyframes fmh-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* ── 按钮按压反馈 ───────────────────────────────────────────────────────
+ * ⚠️ **点击要有明确的物理反馈** ——
+ * 之前点按钮只是"发生了什么就发生什么"，
+ * 手感上像没点到。
+ * 按下时缩一点点 + **光晕描边** + 变暗，一眼就看出"点到了"。 */
+@keyframes fmh-press {
+  0% {
+    transform: scale(1);
+  }
+  45% {
+    transform: scale(0.96);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * 悬停聚焦（Hover Focus）
+ *
+ * ⚠️ **为什么需要它** ——
+ *
+ * 实测（2026-10-21）：原来只改背景色的 hover，差异有多小：
+ *
+ *   secondary  #fffdf9 → #f4efe6   对比度 **1.13:1**
+ *   ghost      透明   → #f4efe6   对比度 **1.07:1**
+ *   primary    #b45309 → #d97706   对比度 1.58:1
+ *
+ * **1.07:1 意味着几乎看不出来** —— 鼠标压在按钮上，
+ * 用户根本不知道"选中没有"。
+ *
+ * ⚠️ **只改背景色是不够的** —— 尤其在暖色底上，
+ *   同一色相的深浅本来就难分辨。
+ *
+ * 所以悬停时**同时**给三个信号：
+ *
+ *   ① 背景变亮/变深（原有行为，加强）
+ *   ② **边框变亮** —— 一条线，比大面积色差更容易察觉
+ *   ③ **外发光** —— 明确的"聚焦"感
+ *   ④ **轻微上浮**（1px）—— 暗示"它可以被按下去"
+ *
+ * ⚠️ **动效要克制** —— 这个面板常驻在 NAS 上，可能一直开着。
+ *   150ms 的过渡足够察觉，又不会让人觉得在晃。
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+.fmh-hoverable {
+  transition:
+    background-color 150ms ease-out,
+    border-color 150ms ease-out,
+    color 150ms ease-out,
+    box-shadow 150ms ease-out,
+    transform 150ms ease-out;
+}
+
+/* ⚠️ **只给"能按"的元素**用 —— 纯展示的文字块不该有悬停反馈。 */
+.fmh-hoverable:hover:not(:disabled):not([aria-disabled='true']) {
+  /* ① 边框变亮 —— 最容易被察觉的信号。 */
+  border-color: var(--accent-line);
+  /* ③ 外发光 + 轻微上浮。 */
+  box-shadow:
+    0 0 0 1px var(--accent-line),
+    0 4px 14px -4px var(--accent-soft),
+    0 1px 3px rgba(15, 23, 42, 0.08);
+  transform: translateY(-1px);
+}
+
+/* ⚠️ **选中态（aria-pressed / aria-current）要更明显** ——
+   悬停只是"指针在这"，选中是"**就是它**"。
+   选中态要有持续的边框 + 底色，不能只有悬停时才有。 */
+.fmh-hoverable[aria-pressed='true']:not(:disabled),
+.fmh-hoverable[aria-current='page']:not(:disabled) {
+  border-color: var(--accent-line);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * 按压反馈
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+@keyframes fmh-press {
+  0% {
+    transform: scale(1);
+  }
+  45% {
+    transform: scale(0.96);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+.fmh-pressable {
+  transition:
+    transform 140ms cubic-bezier(0.34, 1.56, 0.64, 1),
+    filter 140ms ease-out,
+    box-shadow 140ms ease-out;
+}
+
+/* ⚠️ **光晕描边** —— 按下时一圈亮边往外扩。
+   这是"点到了"最直接的视觉信号。 */
+.fmh-pressable:active:not(:disabled) {
+  transform: scale(0.96);
+  filter: brightness(0.94);
+  box-shadow:
+    0 0 0 2px var(--accent),
+    0 0 0 5px var(--accent-soft),
+    0 0 14px 1px var(--accent-line);
+}
+
+/* ⚠️ **焦点态也要有光晕** —— 键盘用户要能一眼看到焦点在哪。 */
+.fmh-pressable:focus-visible {
+  box-shadow:
+    0 0 0 2px var(--accent),
+    0 0 0 5px var(--accent-soft);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * 上游源指示灯（快速接入页「现在有什么」）
+ *
+ * ⚠️ **只给这三个灯用** —— 别的地方（侧栏"在线"、模型状态点）
+ *   各有各的语义，不该跟着闪。
+ *
+ * ⚠️ **为什么要有闪烁** ——
+ *
+ * 静态的绿点还是会被当成"一个装饰点"。
+ * 轻微的明暗脉动才能读作"**这个在跑**"。
+ *
+ * ⚠️ **幅度和周期要克制** ——
+ *   周期 1.6 秒，透明度在 1 ↔ 0.35 之间。
+ *   太快会让人眼睛累，太慢就不像"闪"。
+ *
+ * ⚠️ **用 opacity 而不是 transform** ——
+ *   缩放会让灯"胀大"，看着像在跳；
+ *   透明度变化更像"呼吸"，不打扰人。
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+@keyframes fmh-lamp-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* ⚠️ **亮着的灯** —— 亮色绿 + 光晕 + 闪烁。 */
+.fmh-lamp-on {
+  background: var(--lamp-on);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--lamp-on) 45%, transparent),
+    0 0 6px 1px color-mix(in srgb, var(--lamp-on) 60%, transparent);
+  animation: fmh-lamp-blink 1.6s ease-in-out infinite;
+}
+
+/* ⚠️ **灭着的灯** —— 浅灰，**不闪、不发光**。
+   明确是"没开"，不是"坏了"。 */
+.fmh-lamp-off {
+  background: var(--lamp-off);
+}
+
+/* ⚠️ **加载中的旋转** —— 让"正在做"看得见。 */
+@keyframes fmh-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.fmh-spin {
+  animation: fmh-spin 900ms linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ── 焦点环（用 :focus-visible 的现代写法）────────────────────────────── */
+@supports selector(:focus-visible) {
+  :focus:not(:focus-visible) {
+    outline: none;
+  }
+}
+
+/* 模型清单的响应式布局
+ *
+ * ⚠️ **为什么要单独做**：那张表有 7 列，最小宽度 810px。
+ * 在 375px 的手机上容器只有 341px —— 内容会被**裁掉**
+ *（不是横向滚动，是直接看不见）。实测 2026-10-19：
+ * 容器 341px、内容 810px → 右边 5 列完全看不到。
+ *
+ * 所以窄屏下换成卡片布局：
+ *   第一行：模型名（可占满）
+ *   第二行：车道徽章 + 能力 + 状态
+ *   第三行：首字延迟 + 实际服务 + 探测按钮
+ *
+ * ⚠️ 用 `grid-template-areas` 而不是 `display:none` ——
+ * 这样**每个格子的内容还在**（只是重新排布），
+ * 不会出现"手机上少了信息"的情况。 */
+
+/* 桌面：标准表格。 */
+.fmh-models-grid {
+  display: grid;
+  grid-template-columns: minmax(190px, 2.2fr) 82px 128px 100px 66px 96px minmax(110px, 1fr) 36px;
+  grid-template-areas:
+    'model lane cap state ttft probed served act';
+}
+
+/* 窄屏：卡片。 */
+@media (max-width: 1023px) {
+  .fmh-models-grid {
+    grid-template-columns: 1fr auto;
+    grid-template-areas:
+      'model act'
+      'meta  meta'
+      'info  info';
+    row-gap: 6px;
+  }
+}
+
+/* 格子 → 区域。 */
+.fmh-models-grid > .fmh-c-model { grid-area: model; }
+.fmh-models-grid > .fmh-c-lane  { grid-area: lane; }
+.fmh-models-grid > .fmh-c-cap   { grid-area: cap; }
+.fmh-models-grid > .fmh-c-state { grid-area: state; }
+.fmh-models-grid > .fmh-c-ttft  { grid-area: ttft; }
+.fmh-models-grid > .fmh-c-probed{ grid-area: probed; }
+.fmh-models-grid > .fmh-c-served{ grid-area: served; }
+.fmh-models-grid > .fmh-c-act   { grid-area: act; }
+
+@media (max-width: 1023px) {
+  /* 卡片布局下，三个独立格子收进第二行。 */
+  .fmh-models-grid > .fmh-c-lane,
+  .fmh-models-grid > .fmh-c-cap,
+  .fmh-models-grid > .fmh-c-state,
+  .fmh-models-grid > .fmh-c-ttft,
+  .fmh-models-grid > .fmh-c-probed,
+  .fmh-models-grid > .fmh-c-served {
+    display: none;
+  }
+  /* 它们的替代：卡片第二、三行。 */
+  .fmh-models-grid > .fmh-c-meta { display: flex; }
+  .fmh-models-grid > .fmh-c-info { display: flex; }
+}
+
+@media (min-width: 1024px) {
+  .fmh-models-grid > .fmh-c-meta,
+  .fmh-models-grid > .fmh-c-info {
+    display: none;
+  }
+}
