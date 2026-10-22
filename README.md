@@ -926,7 +926,7 @@ docker compose up -d --build
 
 ```bash
 git tag v0.1.0 && git push --tags
-# → ghcr.io/aBon579/free-model-house:0.1.0 / :0.1 / :latest
+# → ghcr.io/abon579/free-model-house:0.1.0 / :0.1 / :latest
 ```
 
 ⚠️ 首次发布后要去
