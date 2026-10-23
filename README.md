@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="fmhface.webp" alt="Free Model House" width="900">
+</p>
+
 # Free Model House —— 项目完整说明
 
 > 一个跑在 NAS 上的**局域网免费模型聚合网关**。
@@ -101,26 +105,43 @@ docker compose up -d --build
 
 📖 完整步骤见 [`docs/operations/nas-deploy.md`](docs/operations/nas-deploy.md)。
 
-### 拿到 Key
+### 拿到 Key（给 Agent 用）
 
-**启动日志里就是完整 Key**：
+**整个项目只有一把推理 Key**，启动日志里直接就是明文：
 
 ```
-fmh  本机 Key fmh-EXAMPLEKEY0000000000000000000000000000
 fmh  局域网 Key fmh-EXAMPLEKEY0000000000000000000000000000
+fmh  管理台初始密码：admin（首次登录后必须修改）
 ```
 
-复制一行就能用。也可以：
+也可以随时取出来：
 
 ```bash
-docker exec free-model-house /fmh key          # 本机 Key（登录管理台用）
-docker exec free-model-house /fmh key lan      # 局域网 Key（给 LAN 里的 Agent 用）
+docker exec free-model-house /fmh key     # 打印这把 Key
 ```
 
-或者打开 `http://<NAS-IP>:8678/`，用本机 Key 登录后到「服务设置」查看。
+> ⚠️ 旧版本里的「本机 Key」**已经删掉了** —— 管理台改成密码登录，
+> 不再需要拿 Key 去换会话。Key 只负责推理面（`/v1/*`），
+> 管理面（`/api/*`）走密码会话，两者不再共用凭据。
 
 ⚠️ 不想让明文 Key 进日志（会被收进日志系统、贴到工单）？
    设 `FMH_HIDE_KEYS=1` 就只打指纹。
+
+### 登录管理台
+
+打开 `http://<NAS-IP>:8678/`，输入**密码**（不是 Key）：
+
+| 步骤 | 说明 |
+|---|---|
+| ① 初始密码 | `admin` |
+| ② 强制改密 | 首次登录后必须改成 **≥ 8 个字符**，不改进不去 |
+| ③ 改完即生效 | **所有已有会话立刻失效**，要用新密码重新登录 |
+| ④ 看 Key | 「服务设置」里默认只显示指纹，点「显示」才回显完整 Key |
+
+> 密码用 bcrypt 存哈希（cost 12），不存明文；
+> 对应 SQLite 设置表里的 `admin_password_hash` 与 `admin_password_changed`。
+> ⚠️ 目前**没有** `fmh passwd` 之类的重置命令 —— 忘了密码只能换一个空的
+> `FMH_DATA` 目录重新初始化，代价是已存的上游凭据要重录。
 
 ### 接进 Claude Code
 
@@ -859,7 +880,7 @@ Free Mdel House/
 │   │   ├── server.go           单端口服务器 + 路由
 │   │   ├── gateway.go          推理面（延迟提交）
 │   │   ├── admin.go            管理面
-│   │   ├── keys.go             Key 分层
+│   │   ├── keys.go             推理 Key + 管理会话
 │   │   ├── parse.go            入站解析
 │   │   ├── collect.go          非流式答案收集
 │   │   ├── sse.go              SSE 写出（延迟提交）
@@ -1009,7 +1030,7 @@ healthcheck:
 | 无 Key 调 `/v1/models` | 401 | ✅ 401 |
 | LAN Key 调 `/v1/models` | 200 | ✅ 200, 28 模型 |
 | LAN Key 调 `/api/status` | 401 | ✅ 401 |
-| 本机 Key 登录管理面 | 200 + Cookie | ✅ |
+| 密码登录管理面 | 200 + Cookie | ✅ |
 | 上游 429（流式） | **真 429 + Retry-After** | ✅ |
 | SPA 回退（`/dashboard`） | 200 HTML | ✅ |
 
@@ -1145,7 +1166,7 @@ healthcheck:
 |---|---|
 | `docs/design/00-overview.md` | 完整设计（架构、语言选型、目录、Docker、路线图、风险表） |
 | `docs/design/01-zen-fingerprint.md` | 四维闸门规范 + 16 条回归测试清单 + **指纹诊断器** + 上游变更流程 |
-| `docs/design/02-key-model.md` | Key 分层、端口布局、威胁模型、各 Agent 配置片段 |
+| `docs/design/02-key-model.md` | Key 与登录模型（单 Key + 密码）、端口布局、威胁模型、各 Agent 配置片段 |
 | `docs/design/03-api-surface.md` | 路由表、`/v1/models` 扩展字段、3 种协议细节、错误码 |
 | `docs/design/04-ui.md` | 视觉语言、5 个页面、**触屏适配** |
 | `docs/design/05-what-we-fake.md` | 我们到底伪造了什么 —— 诚实的心理模型 |

@@ -16,7 +16,7 @@ FMH 对外暴露三套标准推理协议 + 一个模型清单。所有响应遵�
 | POST | `/v1/messages/count_tokens` | ✅ | Anthropic | 本地估算 |
 | GET | `/health` | 本机免 / LAN 要 | — | 存活 |
 | GET | `/admin` | 会话 | — | 管理台 SPA |
-| ANY | `/api/*` | 会话 或 本机 Key | — | 管理 API |
+| ANY | `/api/*` | 会话（密码登录） | — | 管理 API |
 
 **别名**：所有 `/v1/*` 推理路径同时接受**无 `/v1` 前缀**的形式
 （`/chat/completions`、`/models`、`/messages`…），兼容老客户端。
@@ -25,7 +25,7 @@ FMH 对外暴露三套标准推理协议 + 一个模型清单。所有响应遵�
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/api/login` | 用本机 Key 换会话 Cookie |
+| POST | `/api/login` | 用管理密码换会话 Cookie（初始密码 `admin`，首次登录强制改） |
 | GET | `/api/status` | 总体状态（车道、模型数、版本、**出口 IP**、**车道级封锁**） |
 | GET | `/api/models` | 模型清单 + 探测状态 + 冷却倒计时 |
 | GET | `/api/lanes` | 车道详情 + OpenRouter 额度 |

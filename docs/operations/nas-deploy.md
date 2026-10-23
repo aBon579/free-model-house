@@ -13,7 +13,7 @@ ssh user@nas-ip "mkdir -p ~/fmh"
 # ② 进去构建
 ssh user@nas-ip "cd ~/fmh && docker compose up -d --build"
 
-# ③ 看日志，确认两个 Key
+# ③ 看日志，确认 Key 和管理台初始密码
 ssh user@nas-ip "cd ~/fmh && docker compose logs -f fmh"
 ```
 
@@ -28,15 +28,15 @@ ssh user@nas-ip "cd ~/fmh && docker compose logs -f fmh"
 ⚠️ **单端口** —— 推理面和管理面共用 8678。
    所以「局域网推理」开关**默认是开的**，不用另外配。
 
-⚠️ **两个 Key 都是 `fmh-` 前缀 + 40 位 hex**，没有别的段：
+⚠️ **只有一把推理 Key**（`fmh-` 前缀 + 40 位 hex），管理台用**密码**登录：
 
-| Key | 用途 |
+| 凭据 | 用途 |
 |---|---|
-| **本机 Key** | 登录管理台 + 本机推理 |
-| **局域网 Key** | 给 LAN 里的 Agent 用 |
+| **局域网 Key**（`fmh-…`） | 给 Agent 调用推理面用 |
+| **管理密码** | 浏览器登录管理台（初始 `admin`，首次登录强制改） |
 
-它们是**两个独立的值**，不是同一个。
-⚠️ 别把本机 Key 发给 Agent —— 它能登录管理台。
+两者是**两套独立的东西**：Key 泄露不影响管理台，改密码也不影响任何 Agent 配置。
+⚠️ Key 仍然只发给你信任的设备 —— 拿到它就能白嫖你的免费车道。
 
 ---
 
@@ -178,19 +178,19 @@ docker compose logs -f fmh
 
 ```
 fmh  数据库 /data/fmh.db
-fmh  本机 Key fmh-EXAMPLEKEY0000000000000000000000000000
 fmh  局域网 Key fmh-EXAMPLEKEY0000000000000000000000000000
-fmh  [zen] 清单 85 个模型
-fmh  [openrouter] 清单 469 个模型
+fmh  管理台初始密码：admin（首次登录后必须修改）
+fmh  [zen] 清单 9 个模型
+fmh  [kilo] 清单 17 个模型
+fmh  [openrouter] 清单 18 个模型
 fmh  监听 :8678
 ```
 
-⚠️ **日志里是完整 Key** —— 直接复制就能用。
+⚠️ **日志里是完整 Key** —— 直接复制就能用；同一屏还会告诉你管理台初始密码。
 
 ⚠️ 为什么明文进日志：
    启动日志是**唯一**可靠的取 Key 途径 ——
-   管理台要登录才能看 Key，而登录要 Key（鸡生蛋）；
-   `docker exec free-model-house /fmh key` 又要求容器**正在运行**。
+   `docker exec free-model-house /fmh key` 要求容器**正在运行**；
    日志只给指纹的话，首次部署就卡住了。
 
 ⚠️ 不想让明文进日志（会被收进日志系统、贴到工单）：
@@ -199,16 +199,13 @@ fmh  监听 :8678
 其他取法：
 
 ```bash
-docker exec free-model-house /fmh key          # 本机 Key
-docker exec free-model-house /fmh key lan      # 局域网 Key
-docker exec free-model-house /fmh key both     # 两把都打
+docker exec free-model-house /fmh key          # 打印这把 Key（明文）
+docker exec free-model-house /fmh key lan      # 同上，历史别名
+docker exec free-model-house /fmh key both     # 同上，历史别名（只剩一把）
 ```
 
-⚠️ 为什么不能直接从日志里拿完整 Key：日志会被收进日志系统、
-贴到工单、转发到群里 —— 明文 Key 泄漏出去就等于管理台失守。
-所以日志只给指纹，完整 Key 要**主动**去取。
-
-⚠️ 登录管理台后也能在「服务设置」页点「显示」查看。
+⚠️ 管理台登录后也能在「服务设置」页点「显示完整 Key」查看 ——
+默认只给指纹，明文要**主动**点一下。
 
 ---
 
@@ -234,9 +231,9 @@ docker compose exec fmh /fmh healthcheck && echo OK
 | `fmh` | 正常启动 |
 | `fmh healthcheck` | 健康检查（容器 healthcheck 用） |
 | `fmh version` | 打印版本 |
-| `fmh key` | 打印**完整**本机 Key |
-| `fmh key lan` | 打印**完整**局域网 Key |
-| `fmh key both` | 两把都打 |
+| `fmh key` | 打印**完整**推理 Key |
+| `fmh key lan` | 同上（历史别名） |
+| `fmh key both` | 同上（历史别名，现在只剩一把） |
 
 ⚠️ `fmh key` 打印的是**明文** —— 它只读数据目录，不启动服务，
    所以能在容器里跑（`scratch` 里没有 shell，路径要绝对）：
@@ -258,13 +255,11 @@ curl -s http://<NAS-IP>:8678/v1/models \
 
 应该返回模型清单。
 
-⚠️ `fmh-` 前缀的 Key **两个都行** ——
-   推理面认本机 Key 也认局域网 Key。
-   但给 Agent 用的话给**局域网 Key**。
+⚠️ 推理面只认**这一把** `fmh-` Key —— 不再分本机/局域网。
 
 ### 管理台能打开
 
-浏览器打开 `http://<NAS-IP>:8678/`，用**本机 Key** 登录。
+浏览器打开 `http://<NAS-IP>:8678/`，用**密码**登录（初始 `admin`，会强制你先改）。
 
 ---
 
