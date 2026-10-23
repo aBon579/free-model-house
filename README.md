@@ -1087,10 +1087,8 @@ healthcheck:
 
 ## 11. 已知不足
 
-> 这一节经过**三轮**审计与修复
-> （见 `docs/verification/2026-10-19-audit.md`、
-> `2026-10-19-auto-probe.md`、`2026-10-19-gaps-closed.md`）。
-> 三轮共抓到 **15 个真 bug**（3 个严重）。
+> 这一节经过**三轮**审计与修复，三轮共抓到 **15 个真 bug**（3 个严重）。
+> 过程记录未随仓库分发。
 
 诚实地列出来：
 
@@ -1173,10 +1171,4 @@ healthcheck:
 | `docs/operations/nas-deploy.md` | **NAS 部署指南**（构建、配置、验证、排障、备份） |
 | `docs/operations/lan-access.md` | 局域网接入指南（各客户端配置片段）+ 排障 |
 | `docs/upstream-notes.md` | 带日期的上游测量日志与验证方法 |
-| `docs/verification/2026-10-19-m1-fingerprint.md` | 指纹规格的实测依据 |
-| `docs/verification/2026-10-19-three-questions.md` | 三个用户疑问的答案 |
-| `docs/verification/2026-10-19-m3-m5-acceptance.md` | 30/30 端到端验收记录 |
-| `docs/verification/2026-10-19-audit.md` | 第一轮审计：4 个 bug |
-| `docs/verification/2026-10-19-auto-probe.md` | 自动探测：策略 + 3 个 bug |
-| `docs/verification/2026-10-19-gaps-closed.md` | 补齐剩余不足：8 个 bug + 全部实测数据 |
-| `docs/verification/2026-10-20-round4.md` | 第四轮：诊断器 / 自适应 / 费用 / 触屏 + 踩到的 5 个坑 |
+| `docs/verification/upstream-conformance.md` | 上游一致性验证 —— 指纹规格的现行实测依据 |
