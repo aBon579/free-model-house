@@ -608,19 +608,19 @@ export ANTHROPIC_AUTH_TOKEN=fmh-xxxxxxxxxxxxxxxx
 
 **Key 轮换**：
 
-- 轮换 LAN Key → 旧 LAN Key 立即失效，本机 Key 与管理会话不受影响。
-- 轮换本机 Key → LAN 中继自动改用新本机 Key（配置热更新）。
+- 轮换推理 Key → 旧 Key 立即失效；管理会话与上游凭据不受影响。
+- 修改管理密码 → 所有管理会话作废；推理 Key 与 agent 配置完全不受影响。
 - 轮换 OpenRouter Key → 只影响 OpenRouter 车道。
 
 **访问控制**：
 
 - ⚠️ **单端口** —— 推理面和管理面共用 `:8678`。
   隔离**不靠端口**，靠**鉴权**：
-  - `/api/*` 必须要**管理会话 Cookie**（本机 Key 换来的）
+  - `/api/*` 必须要**管理会话 Cookie**（密码登录换来的）
   - `/v1/*` 必须要 **Key**
-  - 两者**互不通用** —— LAN Key 打 `/api/*` 会 401
+  - 两者**互不通用** —— 推理 Key 打 `/api/*` 会 401
 - 「局域网推理」开关**默认开启**。关掉后**非本机来源**的推理请求返回 403；
-  本机 Key 不受影响。
+  本机来源不受影响。
   - 判据是**请求来源**，不是端口 —— 因为只有一个端口。
 - 管理面**同源严格**（不开放 CORS），会话 Cookie 8 小时过期。
 - 想要更强的隔离（管理面只绑 loopback）：
@@ -1385,7 +1385,7 @@ services:
 | POST | `/v1/messages/count_tokens` | ✅ | 本地估算（无需 tokenizer） |
 | GET | `/health` | ❌（本机面） / ✅（LAN 面） | 存活 |
 | GET | `/admin` | 会话 | 管理台 SPA |
-| `/api/*` | | 会话或本机 Key | 管理 API |
+| `/api/*` | | 会话（密码登录） | 管理 API |
 
 **同时提供无 `/v1` 前缀的别名**（`/chat/completions` 等），兼容老客户端。
 
