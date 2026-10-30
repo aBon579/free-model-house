@@ -322,7 +322,6 @@ Claude Code 会调用它做预算判断。FMH **不带 tokenizer**，用启发�
 > 如果把它归到 `invalid_api_key` / `upstream_credential`，
 > 客户端会以为"是我的 key 错了"，而且**会停掉故障转移**。
 > 上游一改规格，整个网关就卡死。
-> （这个坑踩过 —— 要写清楚注释。）
 
 ---
 

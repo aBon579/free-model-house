@@ -55,13 +55,19 @@ type egressEcho struct {
 //
 // ⚠️ 三个源**互为备份** —— 单个源挂掉（限流、改接口、被墙）不能影响功能。
 //
+// ⚠️ **每个源的 country 都必须有值**（拿不到就返回空串）——
+//
+//	probeEcho 里 `echo.country(doc)` 对 nil 函数直接调会 SIGSEGV，
+//	实测崩过一轮：ipify 那条没写 country，探通后进程崩了。
+//
 // ⚠️ 顺序是"最可靠的在前"：ipify 简单稳定；
 //
 //	ipinfo 和 ipapi 额外报国家（面板要显示"这个出口在哪个地区"）。
 var egressEchoes = []egressEcho{
 	{
-		url: "https://api.ipify.org?format=json",
-		ip:  func(m map[string]any) string { return strOf(m["ip"]) },
+		url:     "https://api.ipify.org?format=json",
+		ip:      func(m map[string]any) string { return strOf(m["ip"]) },
+		country: func(map[string]any) string { return "" },
 	},
 	{
 		url: "https://ipinfo.io/json",
@@ -88,7 +94,6 @@ func strOf(v any) string {
 //
 // ⚠️ 它**可失败** —— 拿不到就是拿不到，不影响别的功能。
 type EgressDetector struct {
-	client *http.Client
 	// onChange 在出口变化时触发（用于触发重探）。
 	onChange func(old, new Egress)
 	mu       sync.Mutex
@@ -98,22 +103,22 @@ type EgressDetector struct {
 
 // NewEgressDetector 造一个检测器。
 func NewEgressDetector() *EgressDetector {
-	return &EgressDetector{
-		// ⚠️ **必须用共享的 transport** ——
-		//
-		//   裸 `http.Client` 走的是 Go 的默认 transport，
-		//   它在**连接时**才读系统证书池 ——
-		//   而那时候进程可能已经降权成 nobody，
-		//   `/etc/ssl/certs/ca-certificates.crt` 读不了 →
-		//   出口检测永远失败：
-		//
-		//     tls: failed to verify certificate: x509: failed to load
-		//     system roots and no roots provided; open
-		//     /etc/ssl/certs/ca-certificates.crt: permission denied
-		//
-		//   `Transport()` 里显式挂了**降权前加载的内存证书池**，
-		//   所以不依赖文件权限。
-		client: Transport(),
+	return &EgressDetector{}
+}
+
+// client 现取一个走**当前生效** transport 的 client。
+//
+// ⚠️ **不能在构造时固化 client** ——
+//
+//	代理开关/切换会**替换全局 transport 实例**
+//	（见 proxy.go 的 applyProxyToTransport），
+//	钉死旧实例的话，连接池里留着的直连空闲连接会一直被复用，
+//	出口检测就永远走**老路** —— 页面上"出口 IP"就永远不更新。
+//	每次探测现取，用哪个 transport 由**此刻**的全局指针决定。
+func (d *EgressDetector) client() *http.Client {
+	return &http.Client{
+		Transport: currentTransport(),
+		Timeout:   15 * time.Second,
 	}
 }
 
@@ -148,6 +153,20 @@ func (d *EgressDetector) Detect(ctx context.Context) Egress {
 			continue
 		}
 		got.At = time.Now().UnixMilli()
+		// ⚠️ **探通了但没国家码 → 补查一次**。
+		//
+		//	ipify（排第一、最稳）只回 IP 不回国家；
+		//	面板上"出口 IP（国家）"是用户判断"有没有换成海外"的关键信息，
+		//	缺了它，一个不认识的 IP 数字毫无意义。
+		//	用 ip-api.com 的免费接口补 —— 无 Key、回 {"country": "…"}。
+		//
+		//	⚠️ 失败不报错 —— 国家是"最好有"，不是"必须有"；
+		//	  补查挂了照样返回探通的 IP。
+		if got.Country == "" {
+			if cc, err := lookupCountry(ctx, got.IP); err == nil {
+				got.Country = cc
+			}
+		}
 		d.remember(got)
 		return got
 	}
@@ -167,7 +186,7 @@ func (d *EgressDetector) probeEcho(ctx context.Context, echo egressEcho) (Egress
 		return Egress{}, err
 	}
 	req.Header.Set("Accept", "application/json")
-	resp, err := d.client.Do(req)
+	resp, err := d.client().Do(req)
 	if err != nil {
 		return Egress{}, err
 	}
@@ -189,7 +208,59 @@ func (d *EgressDetector) probeEcho(ctx context.Context, echo egressEcho) (Egress
 	if ip == "" {
 		return Egress{}, &httpStatusError{code: resp.StatusCode}
 	}
-	return Egress{IP: ip, Country: echo.country(doc)}, nil
+	// ⚠️ country 可能为 nil（不需要国家码的源）——
+	//   实测崩过：直接调 nil 函数 = SIGSEGV，进程整个挂。
+	cc := ""
+	if echo.country != nil {
+		cc = echo.country(doc)
+	}
+	return Egress{IP: ip, Country: cc}, nil
+}
+
+// lookupCountry 补查一个 IP 的国家码（两字母，大写）。
+//
+// ⚠️ 用 ip-api.com 的免费端点 —— 无 Key、无频控烦恼
+//
+//	（我们的调用频率是"每次出口检测一次"，远低于它的限制）。
+//
+// ⚠️ **必须走共享 transport** —— 补查的是"经代理出去的 IP"的国家，
+//
+//	探测路径一致才有意义；走直连的话查询本身可能被封，结果也不必一致。
+//
+// ⚠️ 失败返回错误，调用方忽略即可 —— 国家是锦上添花。
+func lookupCountry(ctx context.Context, ip string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		"http://ip-api.com/line/"+ip+"?fields=countryCode", nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := currentTransportClient().Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", &httpStatusError{code: resp.StatusCode}
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 64))
+	if err != nil {
+		return "", err
+	}
+	cc := strings.ToUpper(strings.TrimSpace(string(data)))
+	// 竍返回格式是两字母国家码；别的都当失败。
+	if len(cc) != 2 {
+		return "", &httpStatusError{code: resp.StatusCode}
+	}
+	return cc, nil
+}
+
+// currentTransportClient 是一个走当前生效 transport 的 client
+// （egress 包内复用 —— 与 EgressDetector.client 同一来源）。
+func currentTransportClient() *http.Client {
+	return &http.Client{Transport: currentTransport(), Timeout: 10 * time.Second}
 }
 
 // remember 记下这次的出口，变了就通知。

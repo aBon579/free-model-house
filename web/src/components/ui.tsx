@@ -462,11 +462,12 @@ export function Notice({
   tone = 'accent',
   children,
 }: {
-  tone?: 'accent' | 'warn' | 'bad'
+  tone?: 'accent' | 'ok' | 'warn' | 'bad'
   children: ReactNode
 }) {
   const tones = {
     accent: 'border-[var(--accent-line)] bg-[var(--accent-soft)] text-[var(--accent)]',
+    ok: 'border-[var(--ok-line)] bg-[var(--ok-soft)] text-[var(--ok)]',
     warn: 'border-[var(--warn-line)] bg-[var(--warn-soft)] text-[var(--warn)]',
     bad: 'border-[var(--bad-line)] bg-[var(--bad-soft)] text-[var(--bad)]',
   }

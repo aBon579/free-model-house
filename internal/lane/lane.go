@@ -354,6 +354,20 @@ type Catalog struct {
 	//   这里是内存副本（探测写结论时要立刻查）；
 	//   持久化那份在 `Book` 里（重启后能恢复）。
 	evidence map[string]int64
+	// probeStaleness 是探测结论在**面板上**的保质期。
+	//
+	// ⚠️ **为什么需要它** ——
+	//
+	//	ProbeTTL(10 分钟) 是**路由**用的新鲜度；
+	//	而用户要的是：一个探测间隔过去了，面板上的旧结论
+	//	就该显示"未探测"，等下一轮真的探了再更新。
+	//
+	//	OR 车道不参与自动探测 —— 它的结论如果不按间隔过期，
+	//	会**永远**停留在几天前手动探的那次上，
+	//	用户会以为它一直可用（其实早变了）。
+	//
+	//	⚠️ 0 = 不过期（兜底，main 启动时会设成探测间隔）。
+	probeStaleness time.Duration
 }
 
 func NewCatalog() *Catalog {
@@ -362,6 +376,30 @@ func NewCatalog() *Catalog {
 		byLane:   map[string][]ModelInfo{},
 		evidence: map[string]int64{},
 	}
+}
+
+// SetProbeStaleness 设置探测结论在面板上的保质期（= 探测间隔）。
+//
+// ⚠️ 由 main 在启动与配置变更时调用 —— 探测间隔改了，
+//
+//	结论的"显示寿命"要跟着改，否则旧结论会按老间隔残留。
+func (c *Catalog) SetProbeStaleness(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	c.mu.Lock()
+	c.probeStaleness = d
+	c.mu.Unlock()
+}
+
+// ProbeStaleness 返回当前的面板保质期。
+func (c *Catalog) ProbeStaleness() time.Duration {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.probeStaleness <= 0 {
+		return ProbeTTL
+	}
+	return c.probeStaleness
 }
 
 // Replace 用一份新清单替换整个内容。
@@ -436,11 +474,51 @@ func (c *Catalog) Merge(models []ModelInfo) {
 }
 
 // Models 返回全部模型。
+//
+// ⚠️ **过期的结论读作"未探测"** ——
+//
+//	探测间隔过去了，上一轮的结论就不再代表"现在"。
+//	显示"未探测"是在告诉用户：**等下一轮探完再看**。
+//
+//	⚠️ 结论本身（c.probes）**不动** ——
+//	  过期只是显示层的事；新探测会正常覆盖。
+//	  路由用的 `Probe()` 也照旧（它有自己的 TTL 判断）。
+//
+//	⚠️ `ProbedAt` 保留 —— 用户需要看到"上次探测是什么时候"，
+//	  才知道这个"未探测"是"真没探过"还是"过期了"。
 func (c *Catalog) Models() []ModelInfo {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	out := make([]ModelInfo, len(c.models))
 	copy(out, c.models)
+	stale := c.probeStaleness
+	if stale <= 0 {
+		stale = ProbeTTL
+	}
+	now := time.Now().UnixMilli()
+	for i := range out {
+		if out[i].State == "" || out[i].State == string(StateUnknown) {
+			continue
+		}
+		at := out[i].ProbedAt
+		if at == 0 {
+			if p, ok := c.probes[out[i].ID]; ok {
+				at = p.At
+			}
+		}
+		if at == 0 {
+			continue
+		}
+		// ⚠️ 结论时间**在未来**（时钟回拨 / 测试注入）→ 当作新鲜，
+		//   不做过期判定 —— 否则刚写入的结论会被自己的判定改成 unknown。
+		if at > now {
+			continue
+		}
+		if now-at >= stale.Milliseconds() {
+			out[i].State = string(StateUnknown)
+			out[i].TTFTMs = 0
+		}
+	}
 	return out
 }
 

@@ -204,7 +204,7 @@ docker exec free-model-house /fmh key lan      # 同上，历史别名
 docker exec free-model-house /fmh key both     # 同上，历史别名（只剩一把）
 ```
 
-⚠️ 管理台登录后也能在「服务设置」页点「显示完整 Key」查看 ——
+⚠️ 管理台登录后也能在「Key Hub」页点「显示完整」查看 ——
 默认只给指纹，明文要**主动**点一下。
 
 ---

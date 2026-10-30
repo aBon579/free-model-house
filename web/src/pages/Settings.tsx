@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { KeyRound, Lock, RotateCw } from 'lucide-react'
+import { KeyRound, Lock } from 'lucide-react'
 import { PageTitle } from '../components/Shell'
 import {
   Button,
@@ -13,50 +13,29 @@ import {
   Switch,
   cn,
 } from '../components/ui'
-import { CopyField } from '../components/common'
 import { useToast } from '../components/toast'
-import { LAN_TIERS, type LanTier, type Settings } from '../api/types'
+import type { Settings } from '../api/types'
 import {
   useChangePassword,
-  useKeys,
-  useRotateKey,
   useSaveSettings,
   useSettings,
 } from '../api/client'
 
 /**
- * 每档的默认限额。
+ * 设置页。
  *
- * ⚠️ 必须与后端 `server.TierLimits` 一致 ——
- *   这是前端在"切档位时补默认值"用的。
+ * ⚠️ **「接入」卡片已撤掉** —— 多 Key 与档位管理挪到「Key Hub」页
+ *   （导航 group="系统"）。
+ *   这里只留**网关自身**的配置：探测、数据、密码。
  */
-const TIER_DEFAULTS: Record<Exclude<LanTier, 'deep'>, { perMinute: number; maxConcurrent: number }> = {
-  light: { perMinute: 10, maxConcurrent: 2 },
-  standard: { perMinute: 60, maxConcurrent: 6 },
-}
 
 /** 设置页。 */
 export function Settings() {
   const { data: settings } = useSettings()
-  const { data: keys } = useKeys(false)
   const save = useSaveSettings()
-  const rotate = useRotateKey()
 
-  // ⚠️ **显示完整 Key** —— 默认只给指纹，明文要显式点开。
-  const [revealed, setRevealed] = useState<{ lan: boolean }>({ lan: false })
-  const { data: fullKeys } = useKeys(revealed.lan)
-
-  // 档位列表 —— 优先用后端发的（文案以后端为准），兜底用前端的。
-  const tiers = settings?.lanTiers?.length
-    ? settings.lanTiers.map((t) => ({
-        value: t.value as LanTier,
-        label: t.label,
-        hint: t.hint,
-      }))
-    : LAN_TIERS
   // ⚠️ 本地草稿 —— 后台轮询**不覆盖**用户正在编辑的东西。
   const [draft, setDraft] = useState(settings)
-  const [rotated, setRotated] = useState<string | null>(null)
 
   useEffect(() => {
     setDraft(settings)
@@ -75,169 +54,11 @@ export function Settings() {
     )
   }
 
-  async function doRotate(which: 'local' | 'lan') {
-    const res = await rotate.mutateAsync(which)
-    setRotated(res.value)
-    setTimeout(() => setRotated(null), 6000)
-  }
-
   return (
     <>
       <PageTitle title="设置" />
 
       <div className="space-y-4">
-        {/* 接入 */}
-        <Card>
-          <CardHeader title="接入" />
-          <CardBody className="divide-y divide-[var(--line-soft)]">
-            <Field
-              label="局域网推理"
-              hint="决定局域网里的 Agent 能用多少。限额对所有推理请求一视同仁。"
-            >
-              <div className="space-y-2.5">
-                {/* ⚠️ 三档（light / standard / deep）——
-                    之前是 on/off，粒度太粗：
-                    要么全开（谁都能用你的额度），要么全关。
-                    现在按"用多少"分档。 */}
-                <div className="flex flex-wrap gap-2">
-                  {tiers.map((t) => {
-                    const active = draft.lanTier === t.value
-                    return (
-                      <button
-                        key={t.value}
-                        onClick={() => {
-                          // ⚠️ 换档位就**重置限额** ——
-                          //   否则上一档的数值会带过来
-                          //   （比如从 deep 切到 light，却还留着"不限量"）。
-                          const patch: Partial<Settings> = { lanTier: t.value }
-                          const next: Settings = { ...draft, lanTier: t.value }
-                          if (t.value !== 'deep') {
-                            const def = TIER_DEFAULTS[t.value]
-                            if (draft.lanPerMinute <= 0) {
-                              patch.lanPerMinute = def.perMinute
-                              next.lanPerMinute = def.perMinute
-                            }
-                            if (draft.lanMaxConcurrent <= 0) {
-                              patch.lanMaxConcurrent = def.maxConcurrent
-                              next.lanMaxConcurrent = def.maxConcurrent
-                            }
-                          }
-                          setDraft(next)
-                          save.mutate(patch)
-                        }}
-                        aria-pressed={active}
-                        title={t.hint}
-                        className={cn(
-                          'fmh-touchable fmh-hoverable flex flex-col items-start gap-0.5 rounded-[var(--r-sm)] border px-3 py-2 text-left transition-colors duration-150',
-                          active
-                            ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--ink)]'
-                            : 'border-[var(--line)] text-[var(--ink-2)] hover:bg-[var(--surface-hover)]',
-                        )}
-                      >
-                        <span className="text-[13px] font-medium">{t.label}</span>
-                        <span className="text-[11.5px] text-[var(--ink-3)]">{t.hint}</span>
-                      </button>
-                    )
-                  })}
-                </div>
-
-                {draft.lanTier !== 'deep' ? (
-                  <div
-                    className="flex flex-wrap items-center gap-4 rounded-[var(--r-sm)] border border-[var(--line)] bg-[var(--surface-2)] px-3 py-2.5"
-                    data-fmh="lan-limits"
-                  >
-                    <div>
-                      <div className="mb-1 text-[12px] font-medium text-[var(--ink-2)]">
-                        每分钟请求上限
-                      </div>
-                      <div className="flex items-center gap-1.5">
-                        <Input
-                          type="number"
-                          min={0}
-                          value={draft.lanPerMinute}
-                          onChange={(e) => {
-                            const v = Math.max(0, Number(e.target.value) || 0)
-                            setDraft({ ...draft, lanPerMinute: v })
-                          }}
-                          onBlur={() => save.mutate({ lanPerMinute: draft.lanPerMinute })}
-                          className="w-20"
-                        />
-                        <span className="text-[12px] text-[var(--ink-3)]">
-                          次/分钟（0 = 不限）
-                        </span>
-                      </div>
-                    </div>
-                    <div>
-                      <div className="mb-1 text-[12px] font-medium text-[var(--ink-2)]">
-                        并发上限
-                      </div>
-                      <div className="flex items-center gap-1.5">
-                        <Input
-                          type="number"
-                          min={0}
-                          value={draft.lanMaxConcurrent}
-                          onChange={(e) => {
-                            const v = Math.max(0, Number(e.target.value) || 0)
-                            setDraft({ ...draft, lanMaxConcurrent: v })
-                          }}
-                          onBlur={() => save.mutate({ lanMaxConcurrent: draft.lanMaxConcurrent })}
-                          className="w-20"
-                        />
-                        <span className="text-[12px] text-[var(--ink-3)]">
-                          个（0 = 不限）
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                ) : null}
-
-                <div className="text-[11.5px] leading-[17px] text-[var(--ink-3)]">
-                  限额是对整个网关生效的，不是对单个 Key。
-                </div>
-              </div>
-            </Field>
-
-            <Field label="局域网 Key" hint="局域网内 Agent 调用 API Key">
-              <div className="flex flex-wrap items-center gap-2">
-                {keys ? (
-                  <CopyField
-                    value={
-                      revealed.lan ? (fullKeys?.lan.value ?? '') : keys.lan.hint
-                    }
-                    masked={false}
-                    allowReveal={false}
-                    className="max-w-xs"
-                  />
-                ) : null}
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => setRevealed((r) => ({ ...r, lan: !r.lan }))}
-                >
-                  {revealed.lan ? '隐藏' : '显示完整'}
-                </Button>
-                <Button
-                  size="sm"
-                  onClick={() => doRotate('lan')}
-                  disabled={rotate.isPending}
-                >
-                  <RotateCw size={13} />
-                  轮换
-                </Button>
-              </div>
-            </Field>
-
-            {rotated ? (
-              <div className="pt-3">
-                <Notice tone="warn">
-                  <div className="mb-1.5 font-medium">新的 Key（只显示这一次）</div>
-                  <CopyField value={rotated} masked={false} allowReveal={false} />
-                </Notice>
-              </div>
-            ) : null}
-          </CardBody>
-        </Card>
-
         {/* ⚠️ **自动跨模型调用 + 管理密码并排** ——
             这两张卡都是"小配置"，各占一整行太浪费纵向空间。
             并排放，高度对齐，扫一眼就知道有两个开关。 */}
@@ -405,7 +226,7 @@ function ChangePasswordCard() {
           <div className="text-[12.5px] leading-[19px] text-[var(--ink-2)]">
             <div className="font-medium text-[var(--ink)]">管理台密码</div>
             <p className="mt-1">
-              管理台用密码登录。局域网里的 Agent 用的是另一把 Key，两者是分开的。
+              密码只管这个管理台。Agent 调用的是 Key Hub 里的 Key，与密码互不相干。
             </p>
             <p className="mt-1 text-[var(--ink-3)]">
               改完密码会退出所有管理会话 —— 请用新密码重新登录。

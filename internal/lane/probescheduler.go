@@ -212,6 +212,23 @@ type ProbeProgress struct {
 	// ⚠️ **必须有它** —— 否则只能说"8 个失败"，
 	// 用户会以为全挂了（实际可能是"16 个成功、8 个失败"）。
 	LastAvailable int `json:"lastAvailable,omitempty"`
+	// RoundCounts 是**上一轮批量探测**的统计。
+	//
+	// ⚠️ **这是"探测结论"卡片该显示的数字** ——
+	//   "共探测 N 个"说的必须是**同一轮**里的事，
+	//   不能把几天里手动探过的模型都算上。
+	//
+	// ⚠️ 间隔过了它就**不再代表当下**（readStale 判定见 handleProbes），
+	//   由管理面决定显示 0 还是显示带"过期"标注的旧值。
+	RoundProbed    int `json:"roundProbed,omitempty"`
+	RoundAvailable int `json:"roundAvailable,omitempty"`
+	RoundFailed    int `json:"roundFailed,omitempty"`
+	RoundUnknown   int `json:"roundUnknown,omitempty"`
+	// RoundAt 是上一轮**结束**的时间（epoch ms）。
+	//
+	// ⚠️ 管理面用它判断"这轮结论过了探测间隔没有" ——
+	//   过了就该显示"未探测"而不是沿用旧数字。
+	RoundAt int64 `json:"roundAt,omitempty"`
 }
 
 // Progress 返回当前探测进度。
@@ -231,6 +248,16 @@ func (s *ProbeScheduler) Progress() ProbeProgress {
 	p.LastFailure = s.lastRoundFailure
 	p.LastFailureCount = s.lastFailureCount
 	p.LastAvailable = s.roundAvailableLast
+
+	// ⚠️ **上一轮的统计** —— 只含批量轮次，手动单探不进来。
+	//   失败 = 探了但不是可用也不是未知；未知 = 结论不明（含瞬时故障复核后仍失败）。
+	p.RoundProbed = s.roundProbedLast
+	p.RoundAvailable = s.roundAvailableLast
+	p.RoundFailed = s.roundProbedLast - s.roundAvailableLast
+	if p.RoundFailed < 0 {
+		p.RoundFailed = 0
+	}
+	p.RoundAt = s.lastRun.UnixMilli()
 	return p
 }
 
@@ -286,19 +313,23 @@ func (s *ProbeScheduler) SetErrorHook(fn func(error)) {
 // ⚠️ 它**不阻塞** —— 立刻返回，后台跑。
 // ⚠️ 间隔是**可动态调整**的 ——
 // 管理台改了"探测间隔"，要**立即生效**，不能等重启。
-// 否则又是一个"设置改了没效果"的坑。
+//
+// ⚠️ **下一轮 = 本轮开始 + 间隔（墙钟对齐）** ——
+//
+//	之前是"跑完再等一个完整间隔"：一轮跑 80 秒，
+//	实际周期就成了 80s + 15min = 16 分 20 秒，
+//	用户设 15 分钟、体感永远超时 —— 就是这个累计漂移。
+//	现在跑多久就从间隔里扣多少；间隔 < 一轮耗时时会**立刻接着跑下一轮**。
 func (s *ProbeScheduler) Start(ctx context.Context) {
 	go func() {
 		// ⚠️ 启动后**先等一会儿**再探 ——
 		// 刚启动时用户可能正要开始用，探测会跟真实请求抢配额。
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(30 * time.Second):
-		}
+		// ⚠️ 首轮的触发点也从**现在**算起 —— 30 秒启动延迟
+		//   不该平移后面所有轮次（对齐墙钟后自然吸收）。
+		roundStart := time.Now().Add(30 * time.Second)
+		nextFire := roundStart.Add(s.Interval())
 
-		// ⚠️ 用**可重置的定时器**，而不是固定 ticker —— 改了间隔能立刻生效。
-		timer := time.NewTimer(s.Interval())
+		timer := time.NewTimer(time.Until(nextFire))
 		defer timer.Stop()
 
 		for {
@@ -306,16 +337,28 @@ func (s *ProbeScheduler) Start(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-timer.C:
-				// 探一轮。
+				started := time.Now()
 				s.RunOnce(ctx)
-				// ⚠️ **重新计时** —— 用的是**当前**的间隔。
+				// ⚠️ 下一轮 = **本轮开始** + 当前间隔 —— 跑的时长被扣掉。
 				s.mu.Lock()
 				interval := s.interval
 				s.mu.Unlock()
-				timer.Reset(interval)
+				next := started.Add(interval)
+				// 已经过点了（一轮比间隔还长）→ 立刻跑下一轮。
+				if d := time.Until(next); d > 0 {
+					timer.Reset(d)
+				} else {
+					timer.Reset(time.Second)
+				}
 			}
 		}
 	}()
+}
+
+// NextFireAt 返回"以 roundStart 为本轮开始"时下一轮的触发点。
+// ⚠️ 语义：墙钟对齐 —— 间隔从**开始**算，不从"跑完"算。
+func (s *ProbeScheduler) NextFireAt(roundStart time.Time) time.Time {
+	return roundStart.Add(s.Interval())
 }
 
 // SetInterval 调整探测间隔（动态生效）。
@@ -566,7 +609,7 @@ func (s *ProbeScheduler) run(ctx context.Context, manual bool) {
 
 	// 统一落结论。
 	for _, r := range results {
-		s.finishProbe(r)
+		s.finishProbe(r, true)
 	}
 }
 
@@ -817,7 +860,13 @@ func (s *ProbeScheduler) probeOne(
 }
 
 // finishProbe 把一个探测结论**落盘**（退避记账 + 写回模型行 + 通知回调）。
-func (s *ProbeScheduler) finishProbe(result ProbeResult) {
+//
+// ⚠️ `inRound` 报告这次探测是不是**批量轮次的一部分**。
+//
+//	false = 手动单探（ProbeOne）—— 不计入轮次统计，
+//	否则"共探测 N 个"会混进不在这一轮里的模型，而且跨轮累加，
+//	面板上的数字越滚越大却对不上任何一轮（实测踩过）。
+func (s *ProbeScheduler) finishProbe(result ProbeResult, inRound bool) {
 	if result.Model == "" {
 		return
 	}
@@ -829,24 +878,35 @@ func (s *ProbeScheduler) finishProbe(result ProbeResult) {
 	switch result.State {
 	case StateAvailable:
 		s.backoff[result.Model] = 0
-		// ⚠️ **统计探通的个数** ——
-		//   小结里要说"16 个可用、8 个失败"，
-		//   不能只说"8 个失败"（那会让人以为全挂了）。
-		s.roundAvailable++
 	default:
 		s.backoff[result.Model]++
 	}
-	s.lastRound[result.Model] = s.round
-	// ⚠️ **更新限流比例** —— 给下一轮的自适应批量用。
-	// ⚠️ 只算"限流"，不算其它失败 ——
-	//   闸门拒绝/模型下架**不是**拥挤，它们不会因为少探就恢复。
-	if result.State == StateThrottled {
-		s.roundThrottled++
+	// ⚠️ **退避与轮次号只对批量轮次记账** ——
+	//   手动单探不该把模型的"连续失败次数"也刷上去，
+	//   否则一次手动探测失败会让模型在自动轮里多躲几轮。
+	if inRound {
+		switch result.State {
+		case StateAvailable:
+			// ⚠️ **统计探通的个数** ——
+			//   小结里要说"16 个可用、8 个失败"，
+			//   不能只说"8 个失败"（那会让人以为全挂了）。
+			s.roundAvailable++
+		}
+		s.lastRound[result.Model] = s.round
+		// ⚠️ **更新限流比例** —— 给下一轮的自适应批量用。
+		// ⚠️ 只算"限流"，不算其它失败 ——
+		//   闸门拒绝/模型下架**不是**拥挤，它们不会因为少探就恢复。
+		if result.State == StateThrottled {
+			s.roundThrottled++
+		}
+		if s.roundProbed > 0 {
+			s.lastThrottleRatio = float64(s.roundThrottled) / float64(s.roundProbed)
+		}
+		s.roundProbed++
+	} else {
+		// 手动单探也要清失败计数吗？不 —— 成功已经在上面清了。
+		// 这里只保证**不加轮次统计**。
 	}
-	if s.roundProbed > 0 {
-		s.lastThrottleRatio = float64(s.roundThrottled) / float64(s.roundProbed)
-	}
-	s.roundProbed++
 	s.mu.Unlock()
 
 	// ⚠️ **写回模型行** —— 状态、延迟、能力来源。
@@ -854,16 +914,18 @@ func (s *ProbeScheduler) finishProbe(result ProbeResult) {
 	// 所以它放在调度器内部。
 	s.catalog.ApplyProbe(result)
 
-	// ⚠️ **统计失败原因** ——
-	//   "探测完成但全是未探测" 要能说清为什么。
-	s.mu.Lock()
-	if result.State != StateAvailable && result.Detail != "" {
-		if s.roundFailureReasons == nil {
-			s.roundFailureReasons = map[string]int{}
+	// ⚠️ **统计失败原因** —— 只统计批量轮次的，
+	// "这一轮 N 个模型因为同一个原因失败"说的必须是**同一轮**的事。
+	if inRound {
+		s.mu.Lock()
+		if result.State != StateAvailable && result.Detail != "" {
+			if s.roundFailureReasons == nil {
+				s.roundFailureReasons = map[string]int{}
+			}
+			s.roundFailureReasons[result.Detail]++
 		}
-		s.roundFailureReasons[result.Detail]++
+		s.mu.Unlock()
 	}
-	s.mu.Unlock()
 
 	if hook != nil {
 		hook(result)
@@ -910,7 +972,9 @@ func (s *ProbeScheduler) ProbeOne(ctx context.Context, model string) ProbeResult
 	// ⚠️ 结论用**全名** —— 键要唯一。
 	result.Model = model
 
-	s.finishProbe(result)
+	// ⚠️ **不计入轮次统计** —— 手动单探不是批量轮的一部分，
+	//   混进去会让"共探测 N 个"跨轮累加（实测踩过）。
+	s.finishProbe(result, false)
 	return result
 }
 

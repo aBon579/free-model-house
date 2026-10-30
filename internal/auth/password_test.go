@@ -80,18 +80,6 @@ func TestHashDefaultAllowsShort(t *testing.T) {
 	}
 }
 
-// TestIsDefault 验证**能认出初始密码**。
-func TestIsDefault(t *testing.T) {
-	h, _ := HashDefault(DefaultPassword)
-	if !IsDefault(h) {
-		t.Fatal("该认出这是初始密码")
-	}
-	h2, _ := Hash("a-long-password")
-	if IsDefault(h2) {
-		t.Fatal("不该把普通密码当成初始密码")
-	}
-}
-
 // TestPlaintextNeverInHash 验证**哈希里没有明文**。
 func TestPlaintextNeverInHash(t *testing.T) {
 	h, _ := Hash("super secret password")

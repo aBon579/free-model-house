@@ -50,17 +50,34 @@ var upstreamSem = make(chan struct{}, MaxConcurrentUpstream)
 
 // Transport 是共享的上游 HTTP 客户端。
 // 所有上游流量都走它，这样连接池才是共享的。
+//
+// ⚠️ **代理在 transport 里，不在这里** ——
+//
+//	代理配置变化时要**重建 transport**（见 proxy.go 的 Apply），
+//	client 本身不用动：它每次都取**当前生效**的 transport。
 func Transport() *http.Client {
 	return &http.Client{
-		Transport: transport(),
+		Transport: currentTransport(),
 		// ⚠️ 不要设 Client.Timeout —— 它会覆盖整个响应体读取，
 		// 长回答会被砍掉。空闲检测由 streamReader 负责。
 	}
 }
 
-func transport() *http.Transport {
+// newTransportWithProxy 造一个带代理设置的 transport。
+//
+// ⚠️ **这里与 proxy.go 共享一份 transport** ——
+//
+//	所有上游流量（清单 / 探测 / 推理 / 额度 / 出口检测）都要走代理，
+//	唯一办法是让它们共用同一个 transport，
+//	代理设置只写在这一处。
+func newTransportWithProxy(cfg ProxyConfig) *http.Transport {
 	t := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
+		// ⚠️ **代理优先于环境变量** ——
+		//
+		//   用户在管理台显式配置的代理，语义就是"全部上游流量走它"。
+		//   HTTP_PROXY 环境变量是隐式的、容易忘掉来源，
+		//   显式配置不生效时排障方向应该是配置本身，不是环境。
+		Proxy: proxyFromConfig(cfg),
 		DialContext: (&net.Dialer{
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,

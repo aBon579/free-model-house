@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aBon579/free-model-house/internal/lane"
@@ -45,6 +46,10 @@ type Admin struct {
 	egress *lane.EgressDetector
 	// switches 是车道开关（哪条车道开不开）。
 	switches *lane.LaneSwitches
+	// proxy 是代理出口管理器。
+	proxy *lane.ProxyManager
+	// proxyTest 是异步检测的运行态（POST 触发 / GET 取结果）。
+	proxyTest proxyTest
 	// password 是管理台密码。
 	password *Password
 	// logger 记后台任务的日志（可选）。
@@ -56,6 +61,9 @@ func (a *Admin) SetEgress(e *lane.EgressDetector) { a.egress = e }
 
 // SetLaneSwitches 装上车道开关。
 func (a *Admin) SetLaneSwitches(s *lane.LaneSwitches) { a.switches = s }
+
+// SetProxy 装上代理管理器。
+func (a *Admin) SetProxy(p *lane.ProxyManager) { a.proxy = p }
 
 // SetPassword 装上管理台密码。
 func (a *Admin) SetPassword(p *Password) { a.password = p }
@@ -189,6 +197,14 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		a.handleKeys(w, r)
 	case "/keys/rotate":
 		a.handleRotate(w, r)
+	case "/keys/create":
+		a.handleKeyCreate(w, r)
+	case "/keys/update":
+		a.handleKeyUpdate(w, r)
+	case "/keys/delete":
+		a.handleKeyDelete(w, r)
+	case "/gateway-tier":
+		a.handleGatewayTier(w, r)
 	case "/secrets":
 		a.handleSecrets(w, r)
 	case "/usage":
@@ -203,6 +219,10 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		a.handleLanes(w, r)
 	case "/lanes/switch":
 		a.handleLaneSwitch(w, r)
+	case "/proxy":
+		a.handleProxy(w, r)
+	case "/proxy/test":
+		a.handleProxyTest(w, r)
 	case "/settings":
 		a.handleSettings(w, r)
 	default:
@@ -441,6 +461,12 @@ func (a *Admin) handleModels(w http.ResponseWriter, r *http.Request) {
 	lane.SortModels(models)
 	out := make([]map[string]any, 0, len(models))
 	for _, m := range models {
+		// ⚠️ **关闭的车道不显示** —— 用户关一条车道就是不想看到它的模型；
+		//   留在清单里只会让人怀疑"是不是还能调到"。
+		//   （路由那边 `BuildCandidates` 本就跳过关闭车道，不会真的被调到。）
+		if a.switches != nil && !a.switches.Enabled(m.Lane) {
+			continue
+		}
 		entry := map[string]any{
 			// ⚠️ `m.ID` **已经带车道前缀**了 —— 别再拼一次。
 			"id":         m.ID,
@@ -487,57 +513,253 @@ func (a *Admin) handleModels(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"models": out})
 }
 
-// handleKeys 返回 Key 状态。
+// handleKeys 返回 Key 列表。
 //
 // ⚠️ **默认不回显完整 Key** —— 只给指纹。要看完整 Key 必须显式 `?reveal=1`。
 //
 // 这是有意的：管理台的截图、录屏、共享屏幕都会带上回显出来的 Key。
 //
-// ⚠️ **只有一把推理 Key 了** ——
+// ⚠️ **多 Key 模式** —— `keys` 是数组；`lan` 保留（指向默认那把）
 //
-//	本机 Key 已砍掉（管理台改用密码登录）。
-//	现在**局域网 Key 就是唯一**的推理凭据。
+//	只为兼容旧前端的"快速接入"页。
 func (a *Admin) handleKeys(w http.ResponseWriter, r *http.Request) {
 	reveal := r.URL.Query().Get("reveal") == "1"
-	lan := ""
+	rows := a.keys.List()
+	out := make([]map[string]any, 0, len(rows))
+	for _, k1 := range rows {
+		entry := map[string]any{
+			"id":        k1.ID,
+			"label":     k1.Label,
+			"tier":      k1.Tier,
+			"enabled":   k1.Enabled,
+			"createdAt": k1.CreatedAt,
+			// ⚠️ 指纹永远给 —— 它是"认出这是哪把"的依据。
+			"hint": store.CredentialHint(k1.Key),
+		}
+		if reveal {
+			entry["value"] = k1.Key
+		}
+		out = append(out, entry)
+	}
+	// 兼容：默认 Key（最早创建的）。
+	lanValue := ""
 	if reveal {
-		lan = a.keys.LanKey()
+		lanValue = a.keys.LanKey()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"prefix": KeyPrefix,
+		"prefix":   KeyPrefix,
+		"keys":     out,
+		"maxLabel": MaxKeyLabelChars,
+		// ⚠️ 网关级档位 —— 前端靠它锁定/解锁单 Key 的档位按钮。
+		"gatewayTier": string(a.keys.GatewayTier()),
 		"lan": map[string]any{
-			"name":  LanKeyName,
-			"value": lan,
+			"name":  "默认 Key",
+			"value": lanValue,
 			"hint":  store.CredentialHint(a.keys.LanKey()),
 		},
 		"revealed": reveal,
 	})
 }
 
-// handleRotate 轮换局域网 Key。
+// handleRotate 轮换 Key。
+//
+// ⚠️ **body 带 id** —— 多 Key 下轮换指定的那把；
+//
+//	不带 id 时退化为"轮换默认 Key"（兼容旧前端）。
 func (a *Admin) handleRotate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "只支持 POST"})
 		return
 	}
 	var body struct {
-		Which string `json:"which"` // 只剩 "lan"
+		Which string `json:"which"`
+		ID    string `json:"id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求体不是 JSON"})
 		return
 	}
-	switch body.Which {
-	case "lan":
-		key := a.keys.RotateLanKey()
+	id := body.ID
+	if id == "" {
+		// 兼容：旧前端只发 which=lan —— 轮换默认 Key。
+		if body.Which != "lan" && body.Which != "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "which 必须是 lan"})
+			return
+		}
+		k1, err := a.keys.Rotate("")
+		if err != nil || k1.Key == "" {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "轮换失败"})
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"ok": true, "which": "lan", "value": key,
-			"hint": store.CredentialHint(key),
-			"note": "局域网 Key 已轮换，旧 Key 立即失效；管理会话不受影响",
+			"ok": true, "which": "lan", "value": k1.Key,
+			"hint": store.CredentialHint(k1.Key),
+			"note": "Key 已轮换，旧 Key 立即失效；管理会话不受影响",
 		})
-	default:
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "which 必须是 lan"})
+		return
 	}
+	k1, err := a.keys.Rotate(id)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "id": id, "value": k1.Key,
+		"hint": store.CredentialHint(k1.Key),
+		"note": "Key 已轮换 —— 那台设备要换新 Key 才能继续调用",
+	})
+}
+
+// handleKeyCreate 新建一把 Key。
+//
+// ⚠️ **完整 Key 只在这里出现一次** —— 之后只剩指纹。
+func (a *Admin) handleKeyCreate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "只支持 POST"})
+		return
+	}
+	var body struct {
+		Label string `json:"label"`
+		Tier  string `json:"tier"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求体不是 JSON"})
+		return
+	}
+	k1, err := a.keys.Create(body.Label, body.Tier)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	a.logf("新建调用 Key：%s（标签 %q，档位 %s）", store.CredentialHint(k1.Key), k1.Label, k1.Tier)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true,
+		"key": map[string]any{
+			"id":        k1.ID,
+			"label":     k1.Label,
+			"tier":      k1.Tier,
+			"enabled":   k1.Enabled,
+			"createdAt": k1.CreatedAt,
+			"value":     k1.Key, // ⚠️ 只显示这一次
+			"hint":      store.CredentialHint(k1.Key),
+		},
+	})
+}
+
+// handleKeyUpdate 改标签 / 档位 / 开关。
+func (a *Admin) handleKeyUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "只支持 POST"})
+		return
+	}
+	var body struct {
+		ID      string `json:"id"`
+		Label   string `json:"label"`
+		Tier    string `json:"tier"`
+		Enabled *bool  `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求体不是 JSON"})
+		return
+	}
+	if body.ID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "缺少 id"})
+		return
+	}
+	k1, err := a.keys.Update(body.ID, body.Label, body.Tier, body.Enabled)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true,
+		"key": map[string]any{
+			"id": k1.ID, "label": k1.Label, "tier": k1.Tier,
+			"enabled": k1.Enabled, "createdAt": k1.CreatedAt,
+			"hint": store.CredentialHint(k1.Key),
+		},
+	})
+}
+
+// handleGatewayTier 读/改**网关级限流档位**。
+//
+// GET  —— 返回当前档位 + 档位说明（给前端渲染卡片）。
+// POST —— 切换档位。非 off 时所有 Key 强制跟随；
+//
+//	回 off 后各 Key 按自己存的档位**自动恢复**生效
+//	（设置从未被覆盖，只是优先级变了）。
+func (a *Admin) handleGatewayTier(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		t := a.keys.GatewayTier()
+		perMin, conc := TierLimits(t)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"tier":          string(t),
+			"perMinute":     perMin,
+			"maxConcurrent": conc,
+			"tiers":         gatewayTierLabels(),
+		})
+	case http.MethodPost:
+		var body struct {
+			Tier string `json:"tier"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求体不是 JSON"})
+			return
+		}
+		t := ParseLanTier(body.Tier)
+		// ⚠️ 网关级认 off；其他值里的未知档回落 standard。
+		if body.Tier != string(LanTierOff) && t == LanTierStandard && body.Tier != string(LanTierStandard) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "不认识的档位"})
+			return
+		}
+		a.keys.SetGatewayTier(t)
+		if a.db != nil {
+			if err := a.db.SetSetting(store.SettingGatewayTier, string(t)); err != nil {
+				a.logf("存网关档位失败: %v", err)
+			}
+		}
+		a.logf("网关级限流：%s", t)
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "tier": string(t)})
+	default:
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "不支持的方法"})
+	}
+}
+
+// gatewayTierLabels 是网关档位的中文说明（给前端渲染卡片）。
+//
+// ⚠️ 顺序 off → light → standard → deep（从"不管"到"放开"）。
+func gatewayTierLabels() []map[string]string {
+	return []map[string]string{
+		{"value": string(LanTierOff), "label": "off · 单 Key 分治", "hint": "网关不限制 —— 每把 Key 按自己的档位限流"},
+		{"value": string(LanTierLight), "label": "light · 轻量", "hint": "全部 Key 强制 10 次/分钟、2 并发"},
+		{"value": string(LanTierStandard), "label": "standard · 标准", "hint": "全部 Key 强制 60 次/分钟、6 并发"},
+		{"value": string(LanTierDeep), "label": "deep · 不限", "hint": "全部 Key 不限量"},
+	}
+}
+
+// handleKeyDelete 删一把 Key。
+func (a *Admin) handleKeyDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "只支持 POST"})
+		return
+	}
+	var body struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求体不是 JSON"})
+		return
+	}
+	if body.ID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "缺少 id"})
+		return
+	}
+	if err := a.keys.Delete(body.ID); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // handleSecrets 管理上游凭据。
@@ -648,7 +870,10 @@ func (a *Admin) handleUsage(w http.ResponseWriter, r *http.Request) {
 	if days == "" {
 		days = "30"
 	}
-	from := time.Now().AddDate(0, 0, -30).Format("2006-01-02")
+	// ⚠️ **热力图要整年 365 格** —— 数据窗口固定 366 天
+	//   （含今天，跨年边界才不会缺一格）。
+	//   顶部的总量/按模型表跟着这个窗口走。
+	from := time.Now().AddDate(0, 0, -366).Format("2006-01-02")
 	daily, _ := a.db.DailyUsageRange(from, "2099-01-01")
 	byModel, _ := a.db.ModelUsageAll(from)
 	total, _ := a.db.Total(from)
@@ -674,15 +899,16 @@ func (a *Admin) handleProbes(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	// 加上内存里的（比数据库新的）。
-	summary := a.catalog.SummarizeProbes()
+	//
+	// ⚠️ **summary = 最近一轮批量探测，不是历史累计** ——
+	//
+	//	之前用 catalog.SummarizeProbes()（统计 c.probes 这个
+	//	**从不清空的 map**），换一次代理、模型集合变化后，
+	//	旧结论全留在 map 里 → "可用 15 异常 9"永远混着旧数据，
+	//	新一轮只探了 6 个也显示 26 —— 用户看到的数字和任何一轮都对不上。
+	//	"探测结论"说的一定是**最近这一轮**。
 	out2 := map[string]any{
 		"probes": out,
-		"summary": map[string]any{
-			"probed":    summary.Probed,
-			"available": summary.Available,
-			"failed":    summary.Failed,
-			"unknown":   summary.Unknown,
-		},
 	}
 	// ⚠️ **探测进度** ——
 	//   整轮探测是**异步**的（可能几十秒）。
@@ -690,6 +916,35 @@ func (a *Admin) handleProbes(w http.ResponseWriter, r *http.Request) {
 	//   而不是点完就弹"探测完成"（那是**假的**）。
 	if a.prober != nil {
 		p := a.prober.Progress()
+		// ⚠️ **上一轮的统计** —— "共探测 N 个"只算批量轮次，
+		//   手动单探的模型不进来（否则数字跨轮累加、越滚越大）。
+		//
+		//   ⚠️ **过了探测间隔就归零** —— 旧结论不再代表"现在"，
+		//     显示 0 是在说"等下一轮"。
+		//     判据：上轮结束时间 + 探测间隔 < 现在。
+		roundProbed := p.RoundProbed
+		roundAvail := p.RoundAvailable
+		roundFailed := p.RoundFailed
+		roundUnknown := 0
+		stale := p.RoundAt > 0 &&
+			time.Since(time.UnixMilli(p.RoundAt)) > a.prober.Interval()
+		if stale && !p.Running {
+			roundProbed, roundAvail, roundFailed, roundUnknown = 0, 0, 0, 0
+		}
+		// ⚠️ summary 就用最近一轮的数字 —— 前端的"探测结论"卡读它。
+		out2["summary"] = map[string]any{
+			"probed":    roundProbed,
+			"available": roundAvail,
+			"failed":    roundFailed,
+			"unknown":   roundUnknown,
+		}
+		out2["round"] = map[string]any{
+			"probed":    roundProbed,
+			"available": roundAvail,
+			"failed":    roundFailed,
+			"at":        p.RoundAt,
+			"stale":     stale,
+		}
 		out2["progress"] = map[string]any{
 			"running":    p.Running,
 			"finalizing": p.Finalizing,
@@ -705,6 +960,15 @@ func (a *Admin) handleProbes(w http.ResponseWriter, r *http.Request) {
 			// ⚠️ **探通了几个** ——
 			//   只说"8 个失败"会让人以为全挂了。
 			"lastAvailable": p.LastAvailable,
+		}
+	} else {
+		// 探测器没装（理论上不会）—— 退回累计值，别让面板空着。
+		summary := a.catalog.SummarizeProbes()
+		out2["summary"] = map[string]any{
+			"probed":    summary.Probed,
+			"available": summary.Available,
+			"failed":    summary.Failed,
+			"unknown":   summary.Unknown,
 		}
 	}
 	writeJSON(w, http.StatusOK, out2)
@@ -928,5 +1192,199 @@ func tierLabels() []map[string]string {
 		{"value": string(LanTierLight), "label": "轻量（Light）", "hint": "少量调用 —— 10 次/分钟、2 并发。给偶尔查一下的 agent"},
 		{"value": string(LanTierStandard), "label": "标准（Standard）", "hint": "正常使用 —— 60 次/分钟、6 并发。家里的主力档"},
 		{"value": string(LanTierDeep), "label": "深度（Deep）", "hint": "不限量 —— 自己独占，或出口很干净时用"},
+	}
+}
+
+// handleProxy 读/写代理出口配置。
+//
+// GET  —— 返回当前配置 + 最近一次连通检测的结果。
+// POST —— 应用新配置（立即重建共享 transport，全局生效）。
+func (a *Admin) handleProxy(w http.ResponseWriter, r *http.Request) {
+	if a.proxy == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "代理功能未启用"})
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		cfg := a.proxy.Config()
+		last := a.proxy.LastCheck()
+		writeJSON(w, http.StatusOK, map[string]any{
+			"enabled":     cfg.Enabled,
+			"scheme":      cfg.Scheme,
+			"host":        cfg.Host,
+			"port":        cfg.Port,
+			"address":     cfg.Address(),
+			"up":          last.Up,
+			"lastCheckAt": last.LastCheckAt,
+			"lastError":   last.LastError,
+		})
+	case http.MethodPost:
+		var body struct {
+			Enabled *bool   `json:"enabled"`
+			Scheme  *string `json:"scheme"`
+			Host    *string `json:"host"`
+			Port    *int    `json:"port"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求体不是 JSON"})
+			return
+		}
+		cfg := a.proxy.Config()
+		if body.Enabled != nil {
+			cfg.Enabled = *body.Enabled
+		}
+		if body.Scheme != nil {
+			cfg.Scheme = strings.TrimSpace(*body.Scheme)
+		}
+		if body.Host != nil {
+			cfg.Host = strings.TrimSpace(*body.Host)
+		}
+		if body.Port != nil {
+			cfg.Port = *body.Port
+		}
+		if err := a.proxy.Apply(cfg); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		// 持久化。
+		if a.db != nil {
+			if err := a.db.SetSetting(store.SettingProxyConfig, lane.EncodeProxyConfig(cfg)); err != nil {
+				a.logf("存代理配置失败: %v", err)
+			}
+		}
+		a.logf("代理出口已更新：enabled=%v address=%s", cfg.Enabled, cfg.Address())
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":      true,
+			"enabled": cfg.Enabled,
+			"address": cfg.Address(),
+		})
+	default:
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "不支持的方法"})
+	}
+}
+
+// proxyTestResult 是一次代理检测的完整结果（轮询取回的就是它）。
+type proxyTestResult struct {
+	Running   bool   `json:"running"`
+	Ok        bool   `json:"ok"`
+	Address   string `json:"address,omitempty"`
+	Error     string `json:"error,omitempty"`
+	EgressIP  string `json:"egressIp,omitempty"`
+	EgressCC  string `json:"egressCountry,omitempty"`
+	EgressErr string `json:"egressError,omitempty"`
+	StartedAt int64  `json:"startedAt,omitempty"`
+	DoneAt    int64  `json:"doneAt,omitempty"`
+}
+
+// proxyTest 是检测的运行态（全内存，一次一个）。
+type proxyTest struct {
+	mu      sync.Mutex
+	current proxyTestResult
+}
+
+// start 尝试启动一轮检测；已在跑就返回 false。
+func (p *proxyTest) start(address string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.current.Running {
+		return false
+	}
+	p.current = proxyTestResult{
+		Running:   true,
+		Address:   address,
+		StartedAt: time.Now().UnixMilli(),
+	}
+	return true
+}
+
+// finish 写入结果并结束 Running。
+func (p *proxyTest) finish(res proxyTestResult) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	res.Running = false
+	res.DoneAt = time.Now().UnixMilli()
+	// Address/StartedAt 保留启动时的值。
+	res.Address = p.current.Address
+	res.StartedAt = p.current.StartedAt
+	p.current = res
+}
+
+// snapshot 返回当前状态。
+func (p *proxyTest) snapshot() proxyTestResult {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.current
+}
+
+// handleProxyTest 检测代理连通性 + 经代理的实际出口。
+//
+// ⚠️ **异步两段式** ——
+//
+//	POST → 后台起检测，立刻 202 返回（前端进入"检测中"）。
+//	GET  → 取结果；检测完返回 running=false + 全部数据。
+//
+//	不能同步等：检测最长 35 秒（代理 15s + 出口 20s），
+//	浏览器/反代的超时撑不了那么久，同步等的结果就是
+//	前端拿到 "Failed to fetch"，用户以为代理挂了（其实没挂）。
+func (a *Admin) handleProxyTest(w http.ResponseWriter, r *http.Request) {
+	if a.proxy == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "代理功能未启用"})
+		return
+	}
+	switch r.Method {
+	case http.MethodPost:
+		cfg := a.proxy.Config()
+		if !a.proxyTest.start(cfg.Address()) {
+			// 已有一轮在跑 —— 不算错误，前端继续轮询即可。
+			writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "running": true, "note": "已在检测中"})
+			return
+		}
+		go func() {
+			cfg := a.proxy.Config()
+			res := proxyTestResult{}
+			if cfg.Enabled {
+				// ① 代理开着：先测代理本身。
+				state := a.proxy.TestConns(context.Background())
+				res.Ok = state.Up
+				res.Error = state.LastError
+				// 代理通了才测"经代理的出口"。
+				if state.Up && a.egress != nil {
+					ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+					eg := a.egress.Detect(ctx)
+					cancel()
+					res.EgressIP = eg.IP
+					res.EgressCC = eg.Country
+					res.EgressErr = eg.Err
+				}
+			} else {
+				// ② 代理关着：只测**直连出口**。
+				//
+				// ⚠️ 检测出口不能绑死在"代理开着"上 ——
+				//   用户关掉代理后同样要点"检测"看直连出口
+				//   （页面上的出口 IP 卡片靠它刷新）。
+				//   此时 Ok 表示"出口检测成功"，
+				//   不是"代理连通"。
+				res.Ok = a.egress != nil
+				if a.egress != nil {
+					ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+					eg := a.egress.Detect(ctx)
+					cancel()
+					res.EgressIP = eg.IP
+					res.EgressCC = eg.Country
+					res.EgressErr = eg.Err
+					res.Ok = eg.IP != ""
+					if eg.Err != "" {
+						res.Error = eg.Err
+					}
+				}
+			}
+			a.proxyTest.finish(res)
+		}()
+		writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "running": true})
+	case http.MethodGet:
+		s := a.proxyTest.snapshot()
+		writeJSON(w, http.StatusOK, s)
+	default:
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "只支持 POST / GET"})
 	}
 }

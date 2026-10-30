@@ -1,0 +1,4 @@
+本文件是 go:embed 的占位符。
+
+internal/server/ui.go 用 `//go:embed all:web/dist` 把 UI 打进二进制，
+Go 要求该目录至少有一个文件。前端构建会清空此目录，所以构建后要把它放回来。

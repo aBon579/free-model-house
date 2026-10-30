@@ -1,4 +1,4 @@
-// 手写的类型 —— 后端 Go 结构体的镜像。
+﻿// 手写的类型 —— 后端 Go 结构体的镜像。
 //
 // ⚠️ **不用代码生成**：后端结构体很少变，而生成器会引入一个构建步骤
 //（然后那个步骤迟早会坏）。手写的代价是"后端改了字段这里要跟着改"，
@@ -95,9 +95,33 @@ export interface KeyInfo {
   hint: string
 }
 
+/** 一把调用 Key（多 Key 模式）。 */
+export interface ApiKey {
+  id: string
+  /** 命名标签（≤6 字符）。 */
+  label: string
+  /** 限流档位：light / standard / deep（网关级为 off 时生效）。 */
+  tier: 'light' | 'standard' | 'deep'
+  enabled: boolean
+  createdAt: number
+  /** 指纹（永远有）。 */
+  hint: string
+  /** 明文（只在 reveal=1 / 刚创建时有）。 */
+  value?: string
+}
+
+/** 网关级档位 —— 比单 Key 多一个 off。 */
+export type GatewayTier = 'off' | 'light' | 'standard' | 'deep'
+
 /** Key 集合。 */
 export interface KeysResponse {
   prefix: string
+  /** 多 Key 列表。 */
+  keys: ApiKey[]
+  /** 标签最大长度（字符数）。 */
+  maxLabel: number
+  /** 网关级档位 —— 非 off 时单 Key 的档位被锁定。 */
+  gatewayTier: GatewayTier
   local: KeyInfo
   lan: KeyInfo
   revealed: boolean
@@ -197,6 +221,8 @@ export interface ModelUsage {
   inputTokens: number
   outputTokens: number
   failed: number
+  /** 最近一次被调用的时间（epoch ms）—— 后端按它降序排。 */
+  lastUsedAt: number
   /** 这个模型累计花的美元 —— **只有 OpenRouter 报**。 */
   costUsd?: number
 }
@@ -219,14 +245,44 @@ export interface ProbeResult {
 }
 
 /**
+ * **上一轮批量探测**的统计。
+ *
+ * ⚠️ 这是"探测结论"卡片该显示的数字 ——
+ *   只含批量轮次，手动单探不进来（否则数字跨轮累加）。
+ *
+ * ⚠️ `stale` = 已经过了探测间隔 —— 那时数字已归零，等下一轮。
+ */
+export interface RoundSummary {
+  probed: number
+  available: number
+  failed: number
+  /** 上一轮结束时间（epoch ms）。 */
+  at: number
+  /** 是否已过探测间隔（过了 = 数字已归零）。 */
+  stale: boolean
+}
+
+/**
  * 局域网访问档位。
  *
  * ⚠️ 取值必须与后端的 `server.LanTier` 完全一致。
  *
- * ⚠️ **没有"关闭"档** —— 这个网关就是给局域网里的 agent 用的，
- *   要限制接入就换 Key 或用防火墙，不要用"关掉整个功能"这种钝器。
+ * ⚠️ 单 Key 只有 light/standard/deep 三档；
+ *   off 只在**网关级**存在（网关不限制，各 Key 按自己的档位）。
  */
 export type LanTier = 'light' | 'standard' | 'deep'
+
+/** 网关档位的说明（后端发的兜底）。 */
+export const GATEWAY_TIERS: Array<{
+  value: GatewayTier
+  label: string
+  hint: string
+}> = [
+  { value: 'off', label: 'off · 单 Key 分治', hint: '网关不限制 —— 每把 Key 按自己的档位限流' },
+  { value: 'light', label: 'light · 轻量', hint: '全部 Key 强制 10 次/分钟、2 并发' },
+  { value: 'standard', label: 'standard · 标准', hint: '全部 Key 强制 60 次/分钟、6 并发' },
+  { value: 'deep', label: 'deep · 不限', hint: '全部 Key 不限量' },
+]
 
 /** 档位的中文说明（后端也会发一份，这里是兜底）。 */
 export const LAN_TIERS: Array<{
@@ -278,4 +334,41 @@ export interface QuotaInfo {
   remaining: number
   freeTierUsageToday: number
   label?: string
+}
+
+/** 出口代理配置。 */
+export interface ProxyConfig {
+  enabled: boolean
+  /** 协议：http / https / socks5。 */
+  scheme: 'http' | 'https' | 'socks5'
+  host: string
+  port: number
+}
+
+/** 出口代理的运行状态。 */
+export interface ProxyStatus {
+  enabled: boolean
+  scheme: string
+  host: string
+  port: number
+  /** `scheme://host:port`（空 = 未配置）。 */
+  address: string
+  /** 最近一次连通检测：代理活着吗。 */
+  up: boolean
+  lastCheckAt?: number
+  lastError?: string
+}
+
+/** 代理检测结果 —— 代理连通 + 经代理的实际出口（异步轮询的形状）。 */
+export interface ProxyTestResult {
+  running: boolean
+  ok: boolean
+  address?: string
+  error?: string
+  /** 经代理出去的公网出口（代理通了才有）。 */
+  egressIp?: string
+  egressCountry?: string
+  egressError?: string
+  startedAt?: number
+  doneAt?: number
 }

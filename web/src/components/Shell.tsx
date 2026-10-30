@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import {
   Boxes,
   ChartNoAxesColumn,
+  Globe,
+  KeyRound,
   LogOut,
   Menu,
   Monitor,
@@ -24,6 +26,8 @@ export type RouteKey =
   | 'models'
   | 'usage'
   | 'sources'
+  | 'access'
+  | 'proxy'
   | 'settings'
 
 interface NavItem {
@@ -47,6 +51,10 @@ const navItems: NavItem[] = [
   //   根本分不出哪个是哪个。现在用量的柱状图，上游源的汇聚点。
   { key: 'usage', label: '用量', icon: ChartNoAxesColumn, group: '运行' },
   { key: 'sources', label: '上游源', icon: Waypoints, group: '运行' },
+  // ⚠️ **Key Hub 是"给谁、给多少"的运行服务设置** —— 运行组；
+  //   **出口代理是网络层配置** —— 系统组。
+  { key: 'access', label: 'Key Hub', icon: KeyRound, group: '运行' },
+  { key: 'proxy', label: '出口代理', icon: Globe, group: '系统' },
   { key: 'settings', label: '设置', icon: SettingsIcon, group: '系统' },
 ]
 
@@ -155,7 +163,17 @@ export function Shell({
     return acc
   }, {})
 
-  const sidebar = (
+  /**
+   * 侧栏内容。
+   *
+   * ⚠️ **`mobile` 区分两处用** ——
+   *
+   * 桌面侧栏（永久驻留）：显示"收起"按钮 —— 收起后它还是唯一的展开入口。
+   * 移动端抽屉（临时弹出）：**不显示** —— 抽屉本来就关一次就没了，
+   *   "收起侧栏"在手机上是无效操作（收了也没有更大的空间可用），
+   *   放着只会让手机用户误点。
+   */
+  const sidebar = (mobile: boolean) => (
     <div className="flex h-full flex-col">
       {/* 品牌 */}
       <div
@@ -278,25 +296,29 @@ export function Shell({
           </button>
         </div>
 
-        {/* 收起/展开按钮 —— 收起时它是**唯一**的展开入口。 */}
-        <button
-          onClick={() => setCollapsed((v) => !v)}
-          className={cn(
-            'fmh-touchable fmh-hoverable mt-1 flex h-8 items-center gap-2 rounded-[var(--r-sm)] text-[12px] text-[var(--on-sidebar-dim)] transition-colors duration-150 hover:bg-[var(--sidebar-hover)] hover:text-[var(--on-sidebar)]',
-            collapsed ? 'w-full justify-center px-0' : 'px-2',
-          )}
-          aria-label={collapsed ? '展开侧边栏' : '收起侧边栏'}
-          title={collapsed ? '展开侧边栏' : '收起侧边栏'}
-        >
-          {collapsed ? (
-            <PanelLeftOpen size={14} />
-          ) : (
-            <>
-              <PanelLeftClose size={14} />
-              <span>收起</span>
-            </>
-          )}
-        </button>
+        {/* 收起/展开按钮 —— 只在**桌面侧栏**显示。
+            收起时它是唯一的展开入口；
+            移动端抽屉没有"收起"的概念（关掉抽屉就是收起）。 */}
+        {!mobile ? (
+          <button
+            onClick={() => setCollapsed((v) => !v)}
+            className={cn(
+              'fmh-touchable fmh-hoverable mt-1 flex h-8 items-center gap-2 rounded-[var(--r-sm)] text-[12px] text-[var(--on-sidebar-dim)] transition-colors duration-150 hover:bg-[var(--sidebar-hover)] hover:text-[var(--on-sidebar)]',
+              collapsed ? 'w-full justify-center px-0' : 'px-2',
+            )}
+            aria-label={collapsed ? '展开侧边栏' : '收起侧边栏'}
+            title={collapsed ? '展开侧边栏' : '收起侧边栏'}
+          >
+            {collapsed ? (
+              <PanelLeftOpen size={14} />
+            ) : (
+              <>
+                <PanelLeftClose size={14} />
+                <span>收起</span>
+              </>
+            )}
+          </button>
+        ) : null}
       </div>
     </div>
   )
@@ -316,7 +338,7 @@ export function Shell({
           boxShadow: 'var(--sidebar-shadow)',
         }}
       >
-        {sidebar}
+        {sidebar(false)}
       </aside>
 
       {/* 移动端抽屉 */}
@@ -338,7 +360,7 @@ export function Shell({
             >
               <X size={16} />
             </button>
-            {sidebar}
+            {sidebar(true)}
           </aside>
         </div>
       ) : null}

@@ -162,6 +162,32 @@ func (d *DB) migrate() error {
 			model   TEXT PRIMARY KEY,
 			enabled INTEGER NOT NULL DEFAULT 1
 		)`,
+		// ⚠️ **多把调用 Key** —— 之前只有一把 `lan_key`（存在 settings 表）。
+		//
+		// 需求是"不一样的设备用不一样的 Key"：
+		//   - 每把 Key 一个命名标签（≤6 字），认得出是哪台设备
+		//   - 每把 Key 独立的档位（light / standard / deep）
+		//   - 每把 Key 独立的启停（收走某台设备的权限不用动别的）
+		//
+		// ⚠️ **限流模型** —— 两层：
+		//
+		//	网关级（gateway_tier，settings 表）：off / light / standard / deep
+		//	  off           = 不做网关级限制 → 各 Key 按自己的 tier 限
+		//	  light/deep/…  = 所有 Key **强制跟随**，单 Key 档位锁定
+		//	单 Key 级（本表 tier 列）：light / standard / deep
+		//	  只在网关级为 off 时生效；
+		//	  锁定期间**设置保留**，网关级回 off 后自动恢复生效。
+		//
+		// ⚠️ **id 是公开的**（前端要拿着它改标签/档位/删除），
+		//   key 本体才是凭据 —— 两者分开。
+		`CREATE TABLE IF NOT EXISTS api_keys (
+			id         TEXT PRIMARY KEY,
+			key        TEXT NOT NULL UNIQUE,
+			label      TEXT NOT NULL DEFAULT '',
+			tier       TEXT NOT NULL DEFAULT 'deep',
+			enabled    INTEGER NOT NULL DEFAULT 1,
+			created_at INTEGER NOT NULL
+		)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := d.db.Exec(stmt); err != nil {
@@ -460,6 +486,111 @@ func (d *DB) LoadModelToggles() (map[string]bool, error) {
 // 避免两份形状不一样的定义（那样迟早会记错字段）。
 type UsageRecord = lane.UsageRecord
 
+// ApiKeyRow 是一把调用 Key。
+type ApiKeyRow struct {
+	// ID 是公开标识（前端拿着它改标签/档位/删除）。
+	ID string `json:"id"`
+	// Key 是 Key 本体 —— **只在创建/轮换那一刻回显**。
+	Key string `json:"-"`
+	// Label 是命名标签（≤6 个字符）。
+	Label string `json:"label"`
+	// Tier 是这把 Key 的限流档位（light / standard / deep）。
+	//
+	// ⚠️ 只在网关级为 off 时生效 —— 网关级限着时全部强制跟随网关。
+	Tier string `json:"tier"`
+	// Enabled 是这把 Key 的开关。
+	Enabled bool `json:"enabled"`
+	// CreatedAt 是创建时间（epoch ms）。
+	CreatedAt int64 `json:"createdAt"`
+}
+
+// PutApiKey 写一把 Key（新建或更新）。
+//
+// ⚠️ **不做 label 长度校验** —— 那是管理面的职责（要给用户报错文案）；
+//
+//	存储层只管存取。
+func (d *DB) PutApiKey(row ApiKeyRow) error {
+	v := 0
+	if row.Enabled {
+		v = 1
+	}
+	_, err := d.db.Exec(
+		`INSERT INTO api_keys (id, key, label, tier, enabled, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET
+		   label = excluded.label, tier = excluded.tier, enabled = excluded.enabled`,
+		row.ID, row.Key, row.Label, row.Tier, v, row.CreatedAt)
+	return err
+}
+
+// ListApiKeys 读全部 Key（按创建时间排）。
+func (d *DB) ListApiKeys() ([]ApiKeyRow, error) {
+	rows, err := d.db.Query(`SELECT id, key, label, tier, enabled, created_at
+		 FROM api_keys ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []ApiKeyRow{}
+	for rows.Next() {
+		var r ApiKeyRow
+		var enabled int
+		if err := rows.Scan(&r.ID, &r.Key, &r.Label, &r.Tier, &enabled, &r.CreatedAt); err != nil {
+			return nil, err
+		}
+		r.Enabled = enabled != 0
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// GetApiKeyByID 按 id 取一把 Key。
+func (d *DB) GetApiKeyByID(id string) (ApiKeyRow, bool, error) {
+	var r ApiKeyRow
+	var enabled int
+	err := d.db.QueryRow(`SELECT id, key, label, tier, enabled, created_at
+		 FROM api_keys WHERE id = ?`, id).
+		Scan(&r.ID, &r.Key, &r.Label, &r.Tier, &enabled, &r.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ApiKeyRow{}, false, nil
+	}
+	if err != nil {
+		return ApiKeyRow{}, false, err
+	}
+	r.Enabled = enabled != 0
+	return r, true, nil
+}
+
+// GetApiKeyByKey 按 Key 本体取（鉴权路径 —— 每个请求都要走）。
+func (d *DB) GetApiKeyByKey(key string) (ApiKeyRow, bool, error) {
+	var r ApiKeyRow
+	var enabled int
+	err := d.db.QueryRow(`SELECT id, key, label, tier, enabled, created_at
+		 FROM api_keys WHERE key = ?`, key).
+		Scan(&r.ID, &r.Key, &r.Label, &r.Tier, &enabled, &r.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ApiKeyRow{}, false, nil
+	}
+	if err != nil {
+		return ApiKeyRow{}, false, err
+	}
+	r.Enabled = enabled != 0
+	return r, true, nil
+}
+
+// DeleteApiKey 删一把 Key。
+func (d *DB) DeleteApiKey(id string) error {
+	_, err := d.db.Exec(`DELETE FROM api_keys WHERE id = ?`, id)
+	return err
+}
+
+// CountApiKeys 数有几把 Key。
+func (d *DB) CountApiKeys() (int, error) {
+	var n int
+	err := d.db.QueryRow(`SELECT COUNT(*) FROM api_keys`).Scan(&n)
+	return n, err
+}
+
 // PutUsage 记一次用量。
 // ⚠️ 明细与按天聚合一并写 —— 聚合是为了快查，
 // 明细是为了"哪个模型/客户端用了多少"。
@@ -545,6 +676,9 @@ type ModelUsage struct {
 	InputTokens  int    `json:"inputTokens"`
 	OutputTokens int    `json:"outputTokens"`
 	Failed       int    `json:"failed"`
+	// LastUsedAt 是这个模型**最近一次被调用**的时间（epoch ms）。
+	// ⚠️ 取分组里最新的那条 —— 前端把"最近在用的模型"排在最上面。
+	LastUsedAt int64 `json:"lastUsedAt"`
 	// CostUSD 是这个模型累计花的美元。
 	// ⚠️ **只有 OpenRouter 报** —— 免密车道永远是 0。
 	CostUSD float64 `json:"costUsd"`
@@ -554,10 +688,11 @@ type ModelUsage struct {
 // ⚠️ 按 (请求模型, 实际模型) 分组 ——
 // 这样"请求 A 但由 B 应答"在数据里是**看得见的**，
 // 而不是被聚合抹平。
+// ⚠️ **按最新调用时间降序** —— 最近在用的排最上面。
 func (d *DB) ModelUsageAll(since string) ([]ModelUsage, error) {
 	rows, err := d.db.Query(
-		`SELECT model, lane, actual_model, SUM(requests), SUM(turns), SUM(input_tokens), SUM(output_tokens), SUM(failed), SUM(cost_usd)
-		 FROM usage WHERE day >= ? GROUP BY model, lane, actual_model ORDER BY SUM(requests) DESC`, since)
+		`SELECT model, lane, actual_model, SUM(requests), SUM(turns), SUM(input_tokens), SUM(output_tokens), SUM(failed), SUM(cost_usd), MAX(at)
+		 FROM usage WHERE day >= ? GROUP BY model, lane, actual_model ORDER BY MAX(at) DESC`, since)
 	if err != nil {
 		return nil, err
 	}
@@ -566,7 +701,7 @@ func (d *DB) ModelUsageAll(since string) ([]ModelUsage, error) {
 	for rows.Next() {
 		var u ModelUsage
 		if err := rows.Scan(&u.Model, &u.Lane, &u.ActualModel, &u.Requests, &u.Turns,
-			&u.InputTokens, &u.OutputTokens, &u.Failed, &u.CostUSD); err != nil {
+			&u.InputTokens, &u.OutputTokens, &u.Failed, &u.CostUSD, &u.LastUsedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, u)
@@ -620,6 +755,19 @@ const (
 	SettingLanPerMinute = "lan_per_minute"
 	// SettingLanMaxConcurrent 是 "limited" 档的并发上限（<= 0 = 不限）。
 	SettingLanMaxConcurrent = "lan_max_concurrent"
+	// SettingGatewayTier 是**网关级限流档位**（off / light / standard / deep）。
+	//
+	// ⚠️ 与单 Key 档位（api_keys.tier）的关系：
+	//
+	//	off    —— 网关不限流，各 Key 按自己的 tier 限
+	//	light / standard / deep —— 所有 Key **强制跟随**这个档位，
+	//	          单 Key 的设置**保留**但被锁定；
+	//	          回到 off 后自动恢复生效。
+	//
+	// ⚠️ **旧键 `lan_tier` 迁移** —— 旧版只有一个网关级档位，
+	//   升级后它的值直接搬过来（旧 light/standard/deep → 同名；
+	//   旧数据没有"off"这个概念，一律映射到 off，让单 Key 接管）。
+	SettingGatewayTier = "gateway_tier"
 	// SettingLanPort 是局域网推理的端口。
 	SettingLanPort = "lan_port"
 	// SettingAutoModelSwitch 是「自动跨模型调用」的开关。
@@ -664,6 +812,13 @@ const (
 	SettingSecretOpenRouter = "openrouter_api_key"
 	// SettingModelTogglesApplied 标记模型开关是否已应用过。
 	SettingModelTogglesApplied = "model_toggles_applied"
+	// SettingProxyConfig 是代理出口的配置（JSON）。
+	//
+	// ⚠️ **没有用户名/密码字段** —— 局域网内的代理工具普遍不开认证；
+	//   要认证的代理也不该暴露给整个局域网。
+	// ⚠️ **全局一个入口** —— 不按车道分（上游按出口 IP 记账，
+	//   多出口会分散额度而不是解禁）。
+	SettingProxyConfig = "proxy_config"
 )
 
 // PutJSON 存一个 JSON 值（给设置用）。

@@ -75,10 +75,10 @@ func TestRotateLanKeyInvalidatesOld(t *testing.T) {
 	if newLan == lanBefore {
 		t.Fatal("局域网 Key 该变")
 	}
-	if !keys.MatchLan(newLan) {
+	if !keys.MatchAny(newLan) {
 		t.Fatal("新 Key 该能通过校验")
 	}
-	if keys.MatchLan(lanBefore) {
+	if keys.MatchAny(lanBefore) {
 		t.Fatal("旧 Key 该立即失效")
 	}
 }

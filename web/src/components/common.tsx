@@ -240,6 +240,7 @@ export function CopyField({
   mono = true,
   className,
   revealed: revealedProp,
+  getFullValue,
 }: {
   value: string
   /** 初始是否打码。 */
@@ -250,10 +251,33 @@ export function CopyField({
   className?: string
   /** 受控的显示状态 —— 传了就以外部为准。 */
   revealed?: boolean
+  /**
+   * 取**完整值**的异步函数 —— 打码状态下点"复制"时调用。
+   *
+   * ⚠️ **为什么需要它** ——
+   *
+   * `value` 在打码时是**指纹**（`fmh-3f9a…abcd`），
+   * 直接复制会把指纹抄进剪贴板 —— 那不是 Key，调用方拿去用必然失败。
+   *
+   * 传了 `getFullValue`，复制按钮会**先取完整值再复制**：
+   *   - 界面上仍然只有指纹（防偷窥）
+   *   - 剪贴板里是完整的 Key（能用）
+   *
+   * ⚠️ **与 `revealed` 的判定解耦** ——
+   *   之前靠"当前是否显示完整"来决定复制什么，
+   *   但受控模式下 `value === display` 恒等（页面传什么显示什么），
+   *   打码时也判成"在显示完整值" → 复制出去就是指纹。
+   *   现在只看 `revealed`（外部明确告知）+ `masked`。
+   *
+   * ⚠️ 没传时退化为复制 `value` 本身（对非敏感字段——
+   *   base URL、模型名—— 这就是对的）。
+   */
+  getFullValue?: () => Promise<string>
 }) {
   const [revealedLocal, setRevealedLocal] = useState(!masked)
   const [copied, setCopied] = useState(false)
   const [failed, setFailed] = useState(false)
+  const [fetching, setFetching] = useState(false)
   const toast = useToast()
 
   // ⚠️ 受控优先 —— `revealedProp` 是 `false` 时也要用它的值，
@@ -276,7 +300,26 @@ export function CopyField({
   async function copy() {
     // ⚠️ 用 copyToClipboard 而不是 navigator.clipboard ——
     //   后者在 HTTP（局域网访问 NAS）下不可用，点了没反应。
-    const ok = await copyToClipboard(value)
+    //
+    // ⚠️ **当前显示的不是完整值、且调用方给了取完整值的路** ——
+    //   就现取完整值再复制。
+    //
+    //   判定**只看 revealed + masked**（是否处于打码显示），
+    //   不看 value 的内容 —— 内容比对在受控模式下永远失真。
+    const showingFull = revealed || !masked
+    let full = value
+    if (!showingFull && getFullValue) {
+      setFetching(true)
+      try {
+        full = await getFullValue()
+      } catch {
+        toast.bad('取完整值失败 —— 请先点"显示"再复制')
+        setFetching(false)
+        return
+      }
+      setFetching(false)
+    }
+    const ok = await copyToClipboard(full)
     if (!ok) {
       setFailed(true)
       toast.bad('复制失败 —— 请手动选中后按 Ctrl+C')
@@ -286,7 +329,7 @@ export function CopyField({
     setCopied(true)
     // ⚠️ **弹窗提示** —— 之前只有图标变一下，几乎看不见。
     //   用户点了之后必须**明确知道**"复制成功了"。
-    toast.ok('已复制到剪贴板')
+    toast.ok(showingFull ? '已复制到剪贴板' : '已复制完整值（界面仍显示指纹）')
     setTimeout(() => setCopied(false), 1400)
   }
 
@@ -320,13 +363,15 @@ export function CopyField({
         variant="ghost"
         onClick={copy}
         aria-label="复制"
-        title={copied ? '已复制' : failed ? '复制失败 —— 请手动选中复制' : '复制'}
-        disabled={!value}
+        title={copied ? '已复制' : failed ? '复制失败 —— 请手动选中复制' : fetching ? '正在取完整值…' : '复制'}
+        disabled={!value || fetching}
       >
         {copied ? (
           <Check size={13} className="text-[var(--ok)]" />
         ) : failed ? (
           <X size={13} className="text-[var(--bad)]" />
+        ) : fetching ? (
+          <span className="inline-block h-[13px] w-[13px] animate-spin rounded-full border-2 border-[var(--line)] border-t-[var(--accent)]" />
         ) : (
           <Copy size={13} />
         )}

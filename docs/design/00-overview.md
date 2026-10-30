@@ -238,7 +238,7 @@ type Message struct {
 **为什么必须有三线**：Claude Code 只会说 Anthropic Messages；Codex 只会说 Responses；
 普通 agent 只会说 Chat Completions。一个网关只支持一种，就有一半用户接不进来。
 
-**"工具调用块"的关键细节**（踩过的坑）：
+**"工具调用块"的关键细节**：
 `tool_calls[].index` 是线上协议的累加器 key；**没有 index 的**（Claude 线常见）
 必须用 `call_id` 区分，否则并行工具调用的 id 会互相覆盖，被合并成一个块。
 
@@ -684,9 +684,9 @@ type ThrottleNote struct {
 - 记录：可用性状态 + **首字延迟 (TTFT)** + 探测时间。
 - **首字延迟是选路的关键信号**：一个 30 秒才出字的模型，配上 200s 超时的 agent 会直接失败。
 
-⚠️ **`max_tokens` 不能太小（实测踩过的坑）**：
+⚠️ **`max_tokens` 不能太小**：
 
-原来用 `max_tokens:16`。实测某个模型把 16 个 token **全烧在 reasoning 上**，
+`max_tokens:16` 会导致某些模型把 16 个 token **全烧在 reasoning 上**，
 一个可见 token 都没吐，于是撞上 `max_tokens` 截断（`finish = max-tokens`）。
 
 后果有三个，都很严重：
@@ -942,7 +942,7 @@ recoveries      断流续写/截断续写救回来的次数
 > 这也解释了为什么 `deferStreamResponse` 那种"延迟写头"的技巧是必需的：
 > **不延迟写头，200 一开始就发出去了**，后面再想返回 429 也来不及。
 
-> ⚠️ **实现时最容易踩的坑（真的踩过）**：
+> ⚠️ **实现时最容易出错的地方**：
 >
 > 光把"提交点"的判断写对**不够**。
 > `encoder.Write(chunk)` 会**立刻**写 SSE 帧，而写帧会触发 `WriteHeader(200)`。
@@ -1209,11 +1209,10 @@ Free Mdel House/
 │   │   ├── 02-zen-fingerprint.md # ⚠️ 免密车道规格
 │   │   ├── 03-key-model.md
 │   │   └── 04-api-surface.md
-│   ├── operations/
-│   │   ├── deployment.md
-│   │   ├── lan-access.md         # 局域网接入指南（各 Agent 配置片段）
-│   │   └── troubleshooting.md
-│   └── upstream-notes.md          # 上游行为实测记录
+│   └── operations/
+│       ├── deployment.md
+│       ├── lan-access.md         # 局域网接入指南（各 Agent 配置片段）
+│       └── troubleshooting.md
 │
 └── scripts/
     ├── dev.sh / dev.ps1
@@ -1349,7 +1348,7 @@ services:
 - **"复制接入配置"** 是最核心的动作 —— 一键复制 `base_url` + `key` + 环境变量片段。
   这是"用户免 key 用上免费模型"这句话的落点。
 - **模型体检** 按钮：点一下就发一个 `ping`，显示 TTFT 与结果。**要显式警告"这会消耗上游额度"**。
-- **未保存提示**：设置页离开前提示（踩过"后台轮询覆盖用户草稿"的坑）。
+- **未保存提示**：设置页离开前提示；后台轮询不覆盖用户草稿。
 - **实时刷新**：状态每 15 秒轮询一次；**读取状态不发推理请求**（探测和测试才发）。
 
 ### 8.3 管理面访问控制
@@ -1423,31 +1422,7 @@ Claude Code 只用它做预算判断，误差可接受；**绝不能谎称精确
 
 ---
 
-## 9. 实施路线
-
-| 阶段 | 交付 | 验收标准 |
-|---|---|---|
-| **M0 骨架** | Go 服务 + 路由表 + Key 分层 + SQLite + Docker 构建 | `docker compose up` 后 `/health` 200，镜像 < 30MB |
-| **M1 Zen 免密车道** | 指纹 + 会话铸造 + 工具闸门 + 三线 encoder + `/v1/models` | **一条 200 的真实对话**（这是最关键的一步） |
-| **M2 OpenRouter 车道** | `:free` 识别 + 能力元数据 + 限流 | 用 OR Key 打通一个 `:free` 模型 |
-| **M3 路由与容错** | 候选链 + 故障转移 + 限流账本 + 探测 | 手动关掉一个模型能自动切换 |
-| **M4 Web UI** | 六个页面 + 接入配置一键复制 | 手机浏览器可用 |
-| **M5 LAN 接入** | 单端口 + Key 轮换 + 来源判定 | 另一台机器用 `fmh-` Key 跑通 |
-| **M6 加固** | 用量看板 + 断流三重兜底 + 错误分类完善 | 压测与故障注入 |
-| **M7 文档** | 部署指南 + 各 Agent 接入片段 | 新用户 10 分钟内跑通 |
-
-### 10.1 风险与对策
-
-| 风险 | 影响 | 对策 |
-|---|---|---|
-| **上游闸门再变**（已发生 2 次：v1→v2、`/zen/v1`→`/inference/v1`） | 全部 403 | ① 把闸门规格集中在**一个文件**（`zen_fingerprint.go`），改只改一处 ② 闸门回归测试 ③ 上游失败时**明确报"上游闸门变更"而不是"你的 key 错了"**（`CodeFreeTier`） |
-| **免费额度被耗尽** | 局域网用户全挂 | ① 限流账本 + 短冷却 ② 故障转移 ③ 看板可见 ④ 文档写清"免费不等于无限" |
-| **OpenRouter 免费档限速**（~50 req/day） | 体验差 | ① 与 Zen 车道**分层**：默认走 Zen，OR 作为回落 ② OR Key 只在需要时消耗 ③ 面板显示剩余预期 |
-| **NAS 架构**（arm64/mips） | 镜像跑不起来 | 多架构 buildx；mips 不支持（Go 不官方支持，Node 也不支持）—— 文档注明 |
-| **上游提示词被记录** | 隐私 | 文档显著位置声明；不提供"把上游设为可信"开关 |
-| **上游条款变化导致封号** | 停服 | 明确免责声明：本项目**不承诺**任何上游的可用性 |
-
-### 10.2 合规与免责（必须写进 README 与 UI）
+## 合规与免责
 
 - FMH 是**客户端/网关**，不是模型服务方；所有输出由第三方上游生成。
 - **免费不等于无限，也不等于私有**。免费额度由上游单方面提供，随时可能限流、收费或下线。
@@ -1455,28 +1430,5 @@ Claude Code 只用它做预算判断，误差可接受；**绝不能谎称精确
 - **不要通过本项目发送密码、密钥、个人身份信息、商业机密**。
 - 使用各渠道即表示同意其服务条款与用量政策。
 - FMH 与任何上游厂商无隶属或背书关系。
-
----
-
-## 10. 立即可执行的第一步
-
-**先证明免密车道能通**（M1 的核心），再写其他所有东西。
-
-```bash
-git clone <repo> && cd "Free Mdel House"
-mkdir -p internal/lane && touch internal/lane/zen_fingerprint.go
-```
-
-第一步要写的三个文件：
-
-1. `internal/lane/zen_fingerprint.go`
-   —— `MintSessionId` / `ZenHeaders` / `ApplyZenFingerprint`（别名 + 注入 + 还原）
-2. `internal/lane/zen_test.go`
-   —— §4.2.1 的六个回归测试
-3. `cmd/fmh/main.go` 的最小版
-   —— 起一个 HTTP 服务，`POST /v1/chat/completions` 打到 `opencode.ai/inference/v1/chat/completions`
-
-**判定标准只有一条**：拿到一个真实的 200 + 可读的模型回答。
-在这一条达成之前，不要写 UI、不要写看板、不要写 OpenRouter 车道。
 
 

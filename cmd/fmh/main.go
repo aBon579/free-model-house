@@ -178,6 +178,20 @@ func run(addr, dataDir string, logger *log.Logger) error {
 	book := lane.NewBook()
 	router := lane.NewRouter(catalog, registry, book)
 
+	// ⚠️ **代理出口** —— 在建任何车道**之前**初始化并应用，
+	//   这样车道第一次拉清单就已经走代理了。
+	//
+	//   ⚠️ 全局一个入口、无认证 —— 用户在局域网里跑的代理工具
+	//     （Clash / v2ray…）通常都不开认证。
+	proxy := lane.NewProxyManager()
+	if raw, ok, _ := db.GetSetting(store.SettingProxyConfig); ok && raw != "" {
+		if err := proxy.Apply(lane.ParseProxyConfig(raw)); err != nil {
+			logger.Printf("⚠️ 恢复代理配置失败（忽略，改用直连）: %v", err)
+		} else if cfg := proxy.Config(); cfg.Enabled {
+			logger.Printf("代理出口：已启用（%s）", cfg.Address())
+		}
+	}
+
 	// ⚠️ **车道开关** —— 哪条车道开不开。
 	//
 	// 关掉的车道的模型仍然显示在清单里，但**不进候选链**。
@@ -206,6 +220,8 @@ func run(addr, dataDir string, logger *log.Logger) error {
 	admin := server.NewAdmin(keys, registry, catalog, db, vault)
 	admin.SetLogger(logger)
 	admin.SetLaneSwitches(switches)
+	// ⚠️ **代理管理** —— 供管理台读写配置与检测连通。
+	admin.SetProxy(proxy)
 	// ⚠️ **管理台密码** —— 初始 `admin`，首次登录后强制改。
 	admin.SetPassword(password)
 
@@ -217,7 +233,7 @@ func run(addr, dataDir string, logger *log.Logger) error {
 	srv.SetAdmin(admin)
 
 	applySettings(db, router, logger)
-	applyLanTier(db, gateway)
+	applyLanTier(db)
 
 	// ⚠️ **自动探测要花钱** —— 每一次都是一次真实推理。
 	//   所以它按需探、轮转探、失败退避，而不是"每 N 分钟把全部模型探一遍"。
@@ -314,13 +330,16 @@ func run(addr, dataDir string, logger *log.Logger) error {
 	//   运行时不变，用户会看到"改了没效果"，直到重启。
 	admin.SetConfigHook(func() {
 		applySettings(db, router, logger)
-		applyLanTier(db, gateway)
+		applyLanTier(db)
 		// ⚠️ 探测相关设置也要**立即生效** —— 否则"探测间隔"改了要重启才变。
 		prober.SetEnabled(db.GetBool(store.SettingProbeEnabled, true))
 		prober.SetInterval(probeInterval(db))
 		prober.SetBatchSize(probeBatchSize(db))
 		// ⚠️ 自适应批量。
 		prober.SetAdaptiveBatch(db.GetBool(store.SettingAdaptiveProbe, true))
+		// ⚠️ **结论的面板保质期跟着间隔走** —— 间隔改了，
+		//   旧结论的显示寿命也要跟着改。
+		catalog.SetProbeStaleness(probeInterval(db))
 	})
 
 	// ⑫ 后台任务。
@@ -334,6 +353,9 @@ func run(addr, dataDir string, logger *log.Logger) error {
 	prober.SetEnabled(db.GetBool(store.SettingProbeEnabled, true))
 	prober.SetInterval(probeInterval(db))
 	prober.SetBatchSize(probeBatchSize(db))
+	// ⚠️ **结论的面板保质期 = 探测间隔** ——
+	//   间隔过去了，面板上的结论就该回到"未探测"，等下一轮真探了再显示。
+	catalog.SetProbeStaleness(probeInterval(db))
 	prober.Start(ctx)
 	if prober.Enabled() {
 		logger.Printf("自动探测：已开启（每 %d 分钟**全量**探一遍免费模型）",
@@ -401,25 +423,24 @@ func probeBatchSize(db *store.DB) int {
 	return 100
 }
 
-// applyLanTier 把持久化的局域网档位应用到网关。
+// applyLanTier 把持久化的**网关级档位**应用到 Key 管理器。
 //
-// ⚠️ **兼容旧数据** —— 老数据库只有 `lan_enabled` 布尔值，
+// ⚠️ 老数据迁移：
 //
-//	没有 `lan_tier` 的要按 true→全开 / false→最紧的一档 迁移。
-func applyLanTier(db *store.DB, gateway *server.Gateway) {
-	tier := server.LanTierStandard
-	if raw, ok, err := db.GetSetting(store.SettingLanTier); err == nil && ok && raw != "" {
-		tier = server.ParseLanTier(raw)
-	} else if db.GetBool(store.SettingLanEnabled, true) {
-		tier = server.LanTierDeep
+//	旧版只有一把 Key + 一个网关档位（lan_tier / lan_enabled）。
+//	Keys.load() 已经把旧 Key 迁进 api_keys 表；
+//	网关档位这里迁到新键 gateway_tier ——
+//	旧的 light/standard/deep 在新模型里含义变了
+//	（旧：唯一的限流；新：锁死所有 Key），
+//	所以一律映射到 off，让各 Key 自己的档位接管，
+//	升级后行为不突变。
+func applyLanTier(db *store.DB) {
+	if raw, ok, err := db.GetSetting(store.SettingGatewayTier); err == nil && ok && raw != "" {
+		_ = raw // Keys.load() 已经读了 —— 这里只需要保证老数据迁移过。
+		return
 	}
-	// ⚠️ 限额用**档位的默认值**，除非用户自己存过。
-	defPerMin, defConc := server.TierLimits(tier)
-	gateway.SetLanTier(
-		tier,
-		db.GetInt(store.SettingLanPerMinute, defPerMin),
-		db.GetInt(store.SettingLanMaxConcurrent, defConc),
-	)
+	// 没有新键 —— 写 off（单 Key 接管）。
+	_ = db.SetSetting(store.SettingGatewayTier, string(server.LanTierOff))
 }
 
 // restoreSecrets 恢复已存的上游凭据。

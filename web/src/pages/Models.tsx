@@ -14,7 +14,7 @@ import {
 } from '../components/ui'
 import { LaneBadge, StateText } from '../components/common'
 import { useToast } from '../components/toast'
-import { useModels, useProbeOne, useProbes, useStatus, useUsage } from '../api/client'
+import { useModels, useProbeOne, useProbes, useSettings, useStatus, useUsage } from '../api/client'
 import { useProbeRound } from '../hooks/probeRound'
 import type { ModelInfo, ModelState } from '../api/types'
 
@@ -77,6 +77,7 @@ export function Models() {
   const { data: probes } = useProbes()
   const { data: usage } = useUsage()
   const { data: status } = useStatus()
+  const { data: settings } = useSettings()
   const probeOne = useProbeOne()
   const toast = useToast()
 
@@ -104,13 +105,24 @@ export function Models() {
   }, [usage])
 
   // 探测状态（比清单里的 state 更细）。
+  //
+  // ⚠️ **过期记录直接剔除** —— /api/probes 是数据库的原始快照，
+  //   没有过期判定；不剔除的话，effectiveState 的兜底路径会把
+  //   几天前的旧结论"救活"（后端已把模型行抹成 unknown，
+  //   前端却又从探测表里捞回 available）。
+  //   判据与后端一致：probedAt 距今超过「探测间隔」= 过期。
   const probeMap = useMemo(() => {
+    const intervalMs = (settings?.probeIntervalMin ?? 15) * 60_000
+    const now = Date.now()
     const map = new Map<string, (typeof probes extends undefined ? never : any)>()
     for (const p of probes?.probes ?? []) {
+      if (p.probedAt && now - p.probedAt >= intervalMs) {
+        continue
+      }
       map.set(p.model, p)
     }
     return map
-  }, [probes])
+  }, [probes, settings])
 
   // ⚠️ **上一轮探测的时间** ——
   //

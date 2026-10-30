@@ -39,54 +39,139 @@ func (t *thinkThenFailLane) Do(ctx context.Context, turn *lane.Turn, emit func(l
 	}
 }
 
-// TestLanLightTierLimitsLanKey 验证**轻量档**会限流 LAN Key，
-// 但**本机 Key 照常**。
+// TestGatewayLightTierLimitsAllKeys 验证**网关级轻量档**会限流**所有** Key。
 //
-// ⚠️ 这就是"局域网推理"档位的准确语义：
-// 限流**只对 LAN Key 生效** —— 本机 Key（管理台自己）不受限，
-// 否则管理台自己的轮询会被自己的限流打掉。
-func TestLanLightTierLimitsLanKey(t *testing.T) {
+// ⚠️ 网关级非 off 时所有 Key 强制跟随 ——
+//
+//	不管单 Key 自己是什么档，都按网关的限额走。
+//
+// light = 10 次/分钟 —— 连打 11 个，第 11 个必须 429。
+func TestGatewayLightTierLimitsAllKeys(t *testing.T) {
 	gw, keys := newTestGateway(t)
-	// 轻量档：每分钟 1 次、并发 1。
-	gw.SetLanTier(LanTierLight, 1, 1)
+	keys.SetGatewayTier(LanTierLight)
 
 	body := `{"model":"zen/m1","messages":[{"role":"user","content":"hi"}]}`
-
-	// 第一个 LAN 请求 → 200。
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+keys.LanKey())
-	rec := httptest.NewRecorder()
-	gw.Routes().ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("轻量档第一个请求该 200，实际 %d: %s", rec.Code, rec.Body.String())
+	doReq := func() int {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+keys.LanKey())
+		rec := httptest.NewRecorder()
+		gw.Routes().ServeHTTP(rec, req)
+		return rec.Code
 	}
 
-	// 第二个 → 429（超了每分钟 1 次的配额）。
-	req2 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
-	req2.Header.Set("Authorization", "Bearer "+keys.LanKey())
-	rec2 := httptest.NewRecorder()
-	gw.Routes().ServeHTTP(rec2, req2)
-	if rec2.Code != http.StatusTooManyRequests {
-		t.Fatalf("超限该 429，实际 %d: %s", rec2.Code, rec2.Body.String())
+	// 前 10 个该过（桶容量 = 每分钟 10）。
+	for i := 0; i < 10; i++ {
+		if code := doReq(); code != http.StatusOK {
+			t.Fatalf("第 %d 个请求该 200，实际 %d", i+1, code)
+		}
 	}
-
-	// ⚠️ **第三个请求也是 429** ——
-	//
-	//	本机 Key 已砍掉（管理台改用密码登录），
-	//	所以现在**所有**推理请求都走同一套限额。
-	req3 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
-	req3.Header.Set("Authorization", "Bearer "+keys.LanKey())
-	rec3 := httptest.NewRecorder()
-	gw.Routes().ServeHTTP(rec3, req3)
-	if rec3.Code != http.StatusTooManyRequests {
-		t.Fatalf("限额对所有 Key 一致，该 429，实际 %d: %s", rec3.Code, rec3.Body.String())
+	// 第 11 个 → 429。
+	if code := doReq(); code != http.StatusTooManyRequests {
+		t.Fatalf("第 11 个该 429（超了每分钟 10 次），实际 %d", code)
 	}
 }
 
-// TestLanDeepTierNoLimit 验证**深度档不限流**。
-func TestLanDeepTierNoLimit(t *testing.T) {
+// TestGatewayOffFallsBackToKeyTier 验证**网关级 off** 时按单 Key 档位限流。
+//
+// ⚠️ 这是两层限流的另一半：
+//
+//	网关 off → 单 Key 的 tier 接管；
+//	两把不同档位的 Key 互不影响。
+func TestGatewayOffFallsBackToKeyTier(t *testing.T) {
 	gw, keys := newTestGateway(t)
-	gw.SetLanTier(LanTierDeep, 0, 0)
+	// 网关级 off —— 单 Key 接管。
+	keys.SetGatewayTier(LanTierOff)
+
+	// 主 Key（load 时自动迁移的那把）设成 light：每分钟 10 次。
+	lanID := ""
+	for _, k := range keys.List() {
+		if k.Key == keys.LanKey() {
+			lanID = k.ID
+		}
+	}
+	if lanID == "" {
+		t.Fatal("找不到默认 Key")
+	}
+	if _, err := keys.Update(lanID, "", string(LanTierLight), nil); err != nil {
+		t.Fatalf("设单 Key 档位失败: %v", err)
+	}
+	// 再建一把 deep 的 Key。
+	other, err := keys.Create("第二把", string(LanTierDeep))
+	if err != nil {
+		t.Fatalf("建第二把 Key 失败: %v", err)
+	}
+
+	body := `{"model":"zen/m1","messages":[{"role":"user","content":"hi"}]}`
+	doReq := func(key string) int {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+key)
+		rec := httptest.NewRecorder()
+		gw.Routes().ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	// light 那把：前 10 个 200，第 11 个 429。
+	for i := 0; i < 10; i++ {
+		if code := doReq(keys.LanKey()); code != http.StatusOK {
+			t.Fatalf("单 Key light 第 %d 个该 200，实际 %d", i+1, code)
+		}
+	}
+	if code := doReq(keys.LanKey()); code != http.StatusTooManyRequests {
+		t.Fatalf("单 Key light 第 11 个该 429，实际 %d", code)
+	}
+
+	// deep 那把：light 打满了也不影响它 —— 连打 12 个全 200。
+	for i := 0; i < 12; i++ {
+		if code := doReq(other.Key); code != http.StatusOK {
+			t.Fatalf("单 Key deep 第 %d 个该 200，实际 %d", i+1, code)
+		}
+	}
+}
+
+// TestTierRestoreAfterGatewayUnlock 验证**锁定期间改档位被拒、解锁后原档位恢复**。
+func TestTierRestoreAfterGatewayUnlock(t *testing.T) {
+	keys, db := newTestKeys(t)
+
+	// 单 Key 设 light。
+	lanID := ""
+	for _, k := range keys.List() {
+		if k.Key == keys.LanKey() {
+			lanID = k.ID
+		}
+	}
+	if _, err := keys.Update(lanID, "", string(LanTierLight), nil); err != nil {
+		t.Fatalf("设单 Key 档位失败: %v", err)
+	}
+
+	// 锁定 —— 网关级切到 standard。
+	keys.SetGatewayTier(LanTierStandard)
+	// 锁定期间改档位 → 必须被拒。
+	if _, err := keys.Update(lanID, "", string(LanTierDeep), nil); err == nil {
+		t.Fatal("网关级锁定时改单 Key 档位该被拒")
+	}
+	// 但档位设置**保留** —— 还是 light。
+	got, _, _ := db.GetApiKeyByID(lanID)
+	if got.Tier != string(LanTierLight) {
+		t.Fatalf("锁定期间单 Key 档位被动了：实际 %s，该还是 light", got.Tier)
+	}
+
+	// 解锁 —— 网关级回 off。
+	keys.SetGatewayTier(LanTierOff)
+	// 解锁后 light 的限额**自动恢复**生效（不需要重设）。
+	k1, _, _ := db.GetApiKeyByID(lanID)
+	if k1.Tier != string(LanTierLight) {
+		t.Fatalf("解锁后该恢复成 light，实际 %s", k1.Tier)
+	}
+	// 恢复后能正常改。
+	if _, err := keys.Update(lanID, "", string(LanTierDeep), nil); err != nil {
+		t.Fatalf("解锁后改档位该成功: %v", err)
+	}
+}
+
+// TestGatewayDeepTierNoLimit 验证**网关级 deep 不限流**。
+func TestGatewayDeepTierNoLimit(t *testing.T) {
+	gw, keys := newTestGateway(t)
+	keys.SetGatewayTier(LanTierDeep)
 
 	body := `{"model":"zen/m1","messages":[{"role":"user","content":"hi"}]}`
 	for i := 0; i < 5; i++ {

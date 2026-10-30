@@ -20,6 +20,11 @@
 /tools/sync-upload.py
 /docs/operations/部署到NAS.md
 
+# ── 上游侦察记录（只留本地）──
+# 实测方法与闸门矩阵，公开等于给上游递刀。
+/docs/upstream-notes.md
+/docs/design/05-what-we-fake.md
+
 # ── 一次性的重构/审计脚本 ──
 /tools/trim-comments.py
 /tools/trim-fields.py

@@ -1,9 +1,13 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+﻿import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type {
+  ApiKey,
   KeysResponse,
   ModelInfo,
   ProbeResult,
+  ProxyStatus,
+  ProxyTestResult,
   QuotaInfo,
+  RoundSummary,
   SecretInfo,
   Settings,
   StatusResponse,
@@ -181,6 +185,8 @@ export function useProbes() {
       get<{
         probes: ProbeResult[]
         summary: { probed: number; available: number; failed: number; unknown: number }
+        /** **上一轮批量探测**的统计（不含手动单探）。 */
+        round?: RoundSummary
         progress?: ProbeProgress
       }>('/api/probes'),
     // ⚠️ **正在探测时轮询快一点** ——
@@ -301,6 +307,70 @@ export function useLaneSwitch() {
   })
 }
 
+/** 出口代理状态。 */
+export function useProxy() {
+  return useQuery({
+    queryKey: ['proxy'],
+    queryFn: () => get<ProxyStatus>('/api/proxy'),
+    refetchInterval: 30_000,
+  })
+}
+
+/** 保存出口代理配置（字段可选 —— 只发要改的，后端合并）。 */
+export function useSaveProxy() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: {
+      enabled?: boolean
+      scheme?: string
+      host?: string
+      port?: number
+    }) => post<{ ok: boolean; enabled: boolean; address: string }>('/api/proxy', body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['proxy'] })
+      qc.invalidateQueries({ queryKey: ['status'] })
+    },
+  })
+}
+
+/**
+ * 检测代理 —— 连通性 + 经代理的实际出口。
+ *
+ * ⚠️ **异步两段式** ——
+ *
+ * 检测在后端要跑最长 35 秒（代理 15s + 出口 20s），
+ * 同步等的话浏览器撑不到就报 "Failed to fetch"。
+ *
+ * 所以：POST 触发（立刻返回）→ 每 2 秒 GET 取结果 →
+ * `running` 变 false 时拿最终数据。
+ */
+export function useTestProxy() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: async (): Promise<ProxyTestResult> => {
+      // ① 触发。
+      await post<{ ok: boolean; running: boolean }>('/api/proxy/test')
+      // ② 轮询 —— 上限 40 秒（后端最长 35s，留 5s 余量）。
+      const deadline = Date.now() + 40_000
+      for (;;) {
+        await new Promise((r) => setTimeout(r, 2_000))
+        const res = await get<ProxyTestResult>('/api/proxy/test')
+        if (!res.running) return res
+        if (Date.now() > deadline) {
+          throw new Error('检测超时 —— 代理或出口服务响应太慢')
+        }
+      }
+    },
+    // ⚠️ 检测成功后把 status 缓存也失效 ——
+    //   出口 IP 卡显示的是 status 里的 egress，
+    //   不刷新的话卡片还是旧出口。
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['status'] })
+      qc.invalidateQueries({ queryKey: ['proxy'] })
+    },
+  })
+}
+
 // 变更
 
 /** 轮换一把 Key。 */
@@ -315,6 +385,84 @@ export function useRotateKey() {
     onSuccess: () => {
       // ⚠️ 轮换后所有 Key 相关的缓存都失效 ——
       // 特别是 reveal 的明文。
+      qc.invalidateQueries({ queryKey: ['keys'] })
+      qc.invalidateQueries({ queryKey: ['status'] })
+    },
+  })
+}
+
+// —— Key Hub（多 Key） ——
+
+/** 新建一把 Key。 */
+export function useCreateKey() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: { label: string; tier: string }) =>
+      post<{ ok: boolean; key: ApiKey }>('/api/keys/create', body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['keys'] })
+      qc.invalidateQueries({ queryKey: ['status'] })
+    },
+  })
+}
+
+/** 改一把 Key（标签 / 档位 / 开关）。 */
+export function useUpdateKey() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: {
+      id: string
+      label?: string
+      tier?: string
+      enabled?: boolean
+    }) => post<{ ok: boolean; key: ApiKey }>('/api/keys/update', body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['keys'] })
+      qc.invalidateQueries({ queryKey: ['status'] })
+    },
+  })
+}
+
+/** 删一把 Key。 */
+export function useDeleteKey() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => post<{ ok: boolean }>('/api/keys/delete', { id }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['keys'] })
+      qc.invalidateQueries({ queryKey: ['status'] })
+    },
+  })
+}
+
+/** 轮换指定的一把 Key（多 Key 版）。 */
+export function useRotateKeyById() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) =>
+      post<{ ok: boolean; id: string; value: string; hint: string; note: string }>(
+        '/api/keys/rotate',
+        { id },
+      ),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['keys'] })
+      qc.invalidateQueries({ queryKey: ['status'] })
+    },
+  })
+}
+
+/**
+ * 网关级档位。
+ *
+ * ⚠️ 非 off 时所有 Key 强制跟随；单 Key 档位按钮被锁定。
+ *   回 off 后各 Key 的档位**自动恢复**生效（设置从未被覆盖）。
+ */
+export function useGatewayTier() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (tier: string) =>
+      post<{ ok: boolean; tier: string }>('/api/gateway-tier', { tier }),
+    onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['keys'] })
       qc.invalidateQueries({ queryKey: ['status'] })
     },

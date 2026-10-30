@@ -5,37 +5,39 @@ import (
 	"time"
 )
 
-// **局域网访问档位**。
+// **访问档位** —— 两层限流模型。
 //
-// ⚠️ 之前只有一个 `lan_enabled` 布尔开关 —— 粒度太粗：
-//   要么局域网全开（任何人都能用你的免费额度），
-//   要么全关。
-// 但实际需求是**分级**的：家里的 NAS 可能只让自家几台设备用，
-// 而公司/合租环境需要**限量**。
+// ## 网关级（gateway tier）：off / light / standard / deep
 //
-// 三档（从松到紧）：
+//	off    —— 网关不做限制，各 Key 按自己的档位限
+//	light  —— 所有 Key 强制 10 次/分钟、2 并发
+//	standard —— 所有 Key 强制 60 次/分钟、6 并发
+//	deep   —— 所有 Key 不限
 //
-//	light   —— 轻量：少量调用（给偶尔查一下的 agent）
-//	standard—— 标准：正常用（家里的主力档）
-//	deep    —— 深度：不限量（自己独占，或者出口很干净）
+//	⚠️ 非 off 时单 Key 的档位**锁定不可改**（界面上禁用），
+//	  但设置**保留** —— 回 off 后自动恢复生效。
+//	  这样"临时锁一轮"不会把用户精心配的各设备档位洗掉。
 //
-// ⚠️ **没有"完全关闭"这一档** ——
-//   因为那等于"局域网里的 Agent 完全用不了"，
-//   而这个网关**就是**给局域网里的 agent 用的。
-//   要限制局域网接入，用**换 Key**（轮换 LAN Key）或**防火墙**，
-//   不要用"关掉整个功能"这种钝器。
+// ## 单 Key 级（per-key tier）：light / standard / deep
 //
-// ⚠️ 三档的限制都是**对整个网关**生效的，不是对单个 Key ——
-//   因为免密车道的配额是**全局共享**的，
-//   限制单个 Key 等于没限制（多拿几把 Key 就绕过了）。
+//	只按**这把 Key** 记账 —— 笔记本 60 次/分钟不影响手机。
+//	网关级为 off 时才生效。
 //
-// ⚠️ 本机 Key（管理台自己）**永远不受限** ——
-//   否则管理台自己的轮询会被自己的限流打掉。
+// ⚠️ 限流是对**整个网关**的共享资源（免密车道的全局配额）的保护，
+//   所以网关级的优先级**天然高于**单 Key 级 —— 不是"谁更严格听谁的"，
+//   而是"网关说了算，网关不说话才轮到 Key"。
 
-// LanTier 是局域网访问档位。
+// LanTier 是访问档位。
+//
+// ⚠️ `off` **只对网关级合法** —— 单 Key 没有这个档
+//
+//	（一把不限制的 Key 等于没有这把 Key 的限流，那直接用 deep 就行了，
+//	但"off"对单 Key 语义不明：是不限还是不启用？）。
 type LanTier string
 
 const (
+	// LanTierOff 不限流（**只用于网关级**）—— 各 Key 按自己的档位限。
+	LanTierOff LanTier = "off"
 	// LanTierLight 轻量档 —— 少量调用。
 	LanTierLight LanTier = "light"
 	// LanTierStandard 标准档 —— 正常用。
@@ -49,6 +51,7 @@ var lanTierOrder = map[LanTier]int{
 	LanTierDeep:     0,
 	LanTierStandard: 1,
 	LanTierLight:    2,
+	LanTierOff:      3,
 }
 
 // LanTierRank 返回档位序数。
@@ -59,21 +62,25 @@ func LanTierRank(t LanTier) int {
 	return 3
 }
 
-// LanTierAll 是所有合法档位（给前端渲染下拉框）。
-var LanTierAll = []LanTier{LanTierLight, LanTierStandard, LanTierDeep}
+// LanTierAll 是所有合法的**网关级**档位（给前端渲染卡片）。
+var LanTierAll = []LanTier{LanTierOff, LanTierLight, LanTierStandard, LanTierDeep}
+
+// KeyTierAll 是**单 Key** 的合法档位（没有 off）。
+var KeyTierAll = []LanTier{LanTierLight, LanTierStandard, LanTierDeep}
 
 // ParseLanTier 解析档位字符串。
 //
 // ⚠️ **旧的档位也要能读** ——
 //
-//	  用户升级后数据库里还存着 "off" / "limited" / "lan"。
+//	  用户升级后数据库里还存着 "limited" / "lan"。
 //	  它们要映射到**语义最接近**的新档位，不能变成"未知"：
 //
-//		off     → light（最紧的一档）
 //		limited → light（原来是限流档）
 //		lan     → deep（原来是不限流档）
 func ParseLanTier(s string) LanTier {
 	switch LanTier(s) {
+	case LanTierOff:
+		return LanTierOff
 	case LanTierLight:
 		return LanTierLight
 	case LanTierStandard:
@@ -85,22 +92,25 @@ func ParseLanTier(s string) LanTier {
 		return LanTierLight
 	case "lan":
 		return LanTierDeep
-	case "off":
-		return LanTierLight
 	default:
 		// 认不出来 → **标准档**（不是最紧的）——
-		// 免得升级后局域网突然用不了了。
+		// 免得升级后突然用不了了。
 		return LanTierStandard
 	}
+}
+
+// ParseKeyTier 解析单 Key 的档位 —— off 落到 deep（单 Key 没有 off）。
+func ParseKeyTier(s string) LanTier {
+	t := ParseLanTier(s)
+	if t == LanTierOff {
+		return LanTierDeep
+	}
+	return t
 }
 
 // TierLimits 返回一个档位对应的（每分钟请求数，并发数）。
 //
 // ⚠️ `0` 表示**不限**。
-//
-// ⚠️ 数值是**默认值**，用户在设置页可以改 ——
-//
-//	这里是"合理的起点"，不是硬编码的限制。
 func TierLimits(t LanTier) (perMinute int, maxConcurrent int) {
 	switch t {
 	case LanTierLight:
@@ -110,7 +120,8 @@ func TierLimits(t LanTier) (perMinute int, maxConcurrent int) {
 	case LanTierDeep:
 		return 0, 0
 	default:
-		return 60, 6
+		// off / 未知 —— 不限。
+		return 0, 0
 	}
 }
 

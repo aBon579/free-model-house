@@ -11,47 +11,90 @@ import (
 )
 
 // 本文件实现 **Key 分层**。
-// 三把钥匙，永不相交：
-//	管理会话   HttpOnly Cookie（8h）  管理面     只有 NAS 本机浏览器
-//	LAN Key    fmh-…                  推理面     局域网 Agent 用户
-// 用户要求"项目自己生成一个固定前缀的 API key"，所以**两把推理 Key 用同一个前缀**
-// `fmh-`（形状为 `fmh-<40 hex>`）。
-// 为什么本机 Key 和 LAN Key 用同一个前缀？因为它们是**同一类东西** ——
-// 都是"调用 FMH 推理接口的凭据"。区别不在**形状**上，而在**这把钥匙能开哪扇门**。
-// ⚠️ 但这带来一个设计要求：**两者必须仍然是两把不同的钥匙**。
-// 爆炸半径的分离靠的是"独立轮换"，不是"前缀不同"：
-// 轮换 LAN Key → 旧 LAN Key 失效，本机 Key 与所有工具照常工作。
-// 如果两把钥匙**字面相同**，那 LAN Key 泄露 = 本机 Key 泄露，爆炸半径就完全没分离了。所以：
-// ① 首次生成时，**强制**保证两把钥匙不同
-// ② 启动时校验，若相同则重新生成 LAN Key
+//
+// ## 多把调用 Key（调用管理页）
+//
+// 需求是"不一样的设备/人用不一样的 Key"：
+//   - 每把 Key 一个命名标签（≤6 字），认得出是谁的
+//   - 每把 Key 独立档位（light / standard / deep）—— 网关级为 off 时生效
+//   - 每把 Key 独立启停（收走某台设备不影响别人）
+//
+// ## 两层限流的执行顺序
+//
+//	请求进来 →
+//	  ① 网关级档位不是 off → 用网关的限流器（所有 Key 共用）
+//	  ② 网关级是 off       → 用**这把 Key 自己**的限流器（按 Key 记账）
+//
+// 网关级限流器只有一个；单 Key 限流器每把一个，互不干扰 ——
+// 笔记本 60 次/分钟打满了，手机不受影响。
+//
 // ## 为什么要分层？爆炸半径。
+//
 // 一把要在网络上跑的 Key 迟早会泄露。
-// 泄露的代价应该是"轮换一把 Key"，而不是"本机所有工具的钥匙"。
+// 泄露的代价应该是"轮换那一把 Key"，而不是"所有设备都要换钥匙"。
+// 多 Key 模式下这更直接：每台设备一把，泄了哪把换哪把。
+//
+// 鉴权是**按 Key** 的，不是按端口：
+//	管理会话   HttpOnly Cookie（8h）  管理面     只有 NAS 本机浏览器
+//	调用 Key   fmh-…                  推理面     局域网里的每台设备各一把
 // 详见 docs/design/02-key-model.md。
 
 const (
 	// KeyPrefix 是所有推理 Key 的固定前缀。
-	// 用户要求："项目自己生成一个固定前缀的 API key"。
 	KeyPrefix = "fmh-"
 
-	// LocalKeyName 是本机推理 Key 的名字（管理台显示用）。
-	LocalKeyName = "本机 Key"
-	// LanKeyName 是局域网推理 Key 的名字。
-	LanKeyName = "局域网 Key"
+	// MaxKeyLabelChars 是命名标签的最大长度（按字符数，不是字节数）。
+	//
+	// ⚠️ 中文一个字算一个字符 —— 用 []rune 计数，
+	//   否则 "笔记本" 三个汉字会被 UTF-8 字节数误判成超长。
+	MaxKeyLabelChars = 6
 )
 
-// Keys 管理钥匙与会话。
+// ApiKey 是一把调用 Key 的完整形态。
+//
+// ⚠️ `Key` 用 json:"-" —— **永不序列化**。
+// 它只在两个时刻离开后端：创建/轮换的响应里（只显示一次）。
+type ApiKey struct {
+	ID        string `json:"id"`
+	Key       string `json:"-"`
+	Label     string `json:"label"`
+	Tier      string `json:"tier"`
+	Enabled   bool   `json:"enabled"`
+	CreatedAt int64  `json:"createdAt"`
+}
+
+// Keys 管理调用 Key 与管理会话。
 type Keys struct {
 	mu sync.RWMutex
 	db *store.DB
 
-	// lanKey 是**唯一**的推理 Key。
+	// keys 是全部调用 Key（内存缓存，按 Key 本体索引 —— 鉴权热路径）。
+	keys map[string]ApiKey
+	// limiters 是**每把 Key** 的限流器（按 Key 本体索引）。
 	//
-	// ⚠️ **本机 Key 已砍掉** ——
-	//   管理台改用**密码**登录（见 internal/auth）。
-	//   之前两把钥匙的分工是"本机 Key 换管理会话，LAN Key 调推理"。
-	//   现在管理会话靠密码，所以只剩一把推理 Key。
+	// ⚠️ 网关级为 off 时才被问到 ——
+	//   网关级限着时网关限流器直接裁决，根本走不到这里。
+	//   但限流器**常驻**：Key 的档位改了就重建，
+	//   "网关级锁了一阵再放开"后各 Key 的限流器还在、
+	//   各自的令牌桶状态（剩多少额度）也还在。
+	limiters map[string]*limiter
+	// lanKey 是**兼容层**：旧版那把唯一的 Key。
+	//
+	// ⚠️ 它现在只是"多 Key 里的第一把" ——
+	//   老实例升级后，原来那把 Key 变成 `api_keys` 表里的一行
+	//   （标签"主 Key"），所有现有 Agent 不用改配置。
+	//   保留这个字段是为了 `Banner()` 与 `fmh key` 的启动提示
+	//   还能显示"默认那把"。
 	lanKey string
+
+	// gatewayTier 是网关级档位（off / light / standard / deep）。
+	//
+	// ⚠️ 非 off 时**所有 Key 强制跟随** —— 单 Key 的 tier 被锁定。
+	//   回 off 后各 Key 按自己存的 tier 恢复生效。
+	gatewayTier LanTier
+	// gatewayLimiter 是网关级的限流器（所有 Key 共用）。
+	// nil = 网关级是 off（或 deep —— 不限），不拦。
+	gatewayLimiter *limiter
 
 	// sessions 是管理会话（内存态）。
 	sessions map[string]sessionEntry
@@ -70,9 +113,6 @@ type sessionEntry struct {
 	// label 是会话的标签（给日志用）。
 	label string
 	// mustChange 标记"这个会话必须先改密码"。
-	//
-	// ⚠️ 用**初始密码** `admin` 登录时置位 ——
-	//   改完密码就清掉（实际上改完密码所有会话都作废了）。
 	mustChange bool
 }
 
@@ -87,71 +127,438 @@ func NewKeys(db *store.DB) *Keys {
 	return k
 }
 
-// load 从数据库读出（或生成）推理 Key。
-// ⚠️ **懒生成**：第一次访问时铸造并持久化。
-// 这样密钥文件被删也不会导致服务起不来（只是换了一把新钥匙）。
+// load 读出全部 Key；一把都没有时铸造第一把。
+//
+// ⚠️ **老实例迁移** ——
+//
+//	旧版只有 settings 表里的一把 `lan_key`。
+//	升级后 `api_keys` 表是空的：把那把 Key 迁进去（标签"主 Key"，deep 档），
+//	所有现有 Agent 的配置**一个字都不用改**。
+//
+//	旧版还有一个**网关级**档位（lan_tier）—— 直接搬到 gateway_tier。
+//	但旧的 light/standard/deep 在新模型里含义变了
+//	（旧：唯一的限流；新：锁死所有 Key）——
+//	为升级后行为不突变，一律映射到 off，让单 Key 接管。
 func (k *Keys) load() {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	k.lanKey = k.readOrMint(store.SettingLanKey)
-}
 
-// readOrMint 读一把钥匙；没有就铸造一把并存起来。
-func (k *Keys) readOrMint(setting string) string {
-	if v, ok, err := k.db.GetSetting(setting); err == nil && ok && v != "" {
-		return v
+	k.keys = map[string]ApiKey{}
+	k.limiters = map[string]*limiter{}
+
+	rows, err := k.db.ListApiKeys()
+	if err == nil && len(rows) > 0 {
+		for _, r := range rows {
+			k1 := ApiKey{
+				ID: r.ID, Key: r.Key, Label: r.Label,
+				Tier: string(ParseKeyTier(r.Tier)), Enabled: r.Enabled, CreatedAt: r.CreatedAt,
+			}
+			k.keys[r.Key] = k1
+			k.rebuildLimiterLocked(k1)
+		}
+		k.lanKey = k.oldestLocked()
+	} else {
+		// 一把都没有 —— 迁移旧 Key，或铸造新的。
+		var key string
+		if old, ok, err := k.db.GetSetting(store.SettingLanKey); err == nil && ok && old != "" {
+			key = old
+		} else {
+			key = store.GenerateKey(KeyPrefix)
+			_ = k.db.SetSetting(store.SettingLanKey, key)
+		}
+		row := store.ApiKeyRow{
+			ID: store.GenerateKey("fmh-kid"), Key: key,
+			Label: "主 Key", Tier: string(LanTierDeep),
+			Enabled: true, CreatedAt: time.Now().UnixMilli(),
+		}
+		if err := k.db.PutApiKey(row); err == nil {
+			k1 := ApiKey{
+				ID: row.ID, Key: key, Label: row.Label,
+				Tier: row.Tier, Enabled: true, CreatedAt: row.CreatedAt,
+			}
+			k.keys[key] = k1
+			k.rebuildLimiterLocked(k1)
+		}
+		k.lanKey = key
 	}
-	key := store.GenerateKey(KeyPrefix)
-	_ = k.db.SetSetting(setting, key)
-	return key
+
+	// 网关级档位：新键优先，旧键迁移到 off。
+	if raw, ok, err := k.db.GetSetting(store.SettingGatewayTier); err == nil && ok && raw != "" {
+		k.gatewayTier = ParseLanTier(raw)
+	} else {
+		k.gatewayTier = LanTierOff
+		_ = k.db.SetSetting(store.SettingGatewayTier, string(LanTierOff))
+	}
+	k.rebuildGatewayLimiterLocked()
 }
 
-// LanKey 返回局域网推理 Key。
+// rebuildLimiterLocked 按 Key 的档位（重）建它的限流器（调用方持锁）。
+//
+// ⚠️ 换新限流器 = 令牌桶清零重来 ——
+//
+//	改档位本来就是用户明确想改限制，旧桶里的余额没有保留价值。
+func (k *Keys) rebuildLimiterLocked(k1 ApiKey) {
+	t := ParseKeyTier(k1.Tier)
+	if t == LanTierDeep {
+		k.limiters[k1.Key] = nil
+		return
+	}
+	perMin, conc := TierLimits(t)
+	k.limiters[k1.Key] = newLimiter(perMin, conc)
+}
+
+// rebuildGatewayLimiterLocked 按网关档位（重）建网关限流器（调用方持锁）。
+func (k *Keys) rebuildGatewayLimiterLocked() {
+	switch k.gatewayTier {
+	case LanTierLight, LanTierStandard:
+		perMin, conc := TierLimits(k.gatewayTier)
+		k.gatewayLimiter = newLimiter(perMin, conc)
+	default:
+		// off / deep —— 不拦。
+		k.gatewayLimiter = nil
+	}
+}
+
+// oldestLocked 取最早创建的 Key（调用方持锁）。
+func (k *Keys) oldestLocked() string {
+	var best string
+	var bestAt int64
+	first := true
+	for _, k1 := range k.keys {
+		if first || k1.CreatedAt < bestAt {
+			best, bestAt, first = k1.Key, k1.CreatedAt, false
+		}
+	}
+	return best
+}
+
+// LanKey 返回默认（最早创建）的调用 Key。
+//
+// ⚠️ 只用于启动横幅与 `fmh key` ——
+//
+//	管理台上应该用"调用管理"页列出全部 Key。
 func (k *Keys) LanKey() string {
 	k.mu.RLock()
 	defer k.mu.RUnlock()
 	return k.lanKey
 }
 
-// RotateLanKey 轮换 LAN Key。
-// ⚠️ 旧 Key 立即失效；管理会话**不受影响**。
-func (k *Keys) RotateLanKey() string {
-	key := store.GenerateKey(KeyPrefix)
-	k.mu.Lock()
-	k.lanKey = key
-	k.mu.Unlock()
-	_ = k.db.SetSetting(store.SettingLanKey, key)
-	return key
+// GatewayTier 返回网关级档位。
+func (k *Keys) GatewayTier() LanTier {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	return k.gatewayTier
 }
 
-// MatchAny 校验一个 Key 是不是**推理 Key**。
+// SetGatewayTier 设置网关级档位。
 //
-// ⚠️ 推理面用这个 —— 单端口下，LAN 里的 agent 拿的就是 LAN Key，
-// 而它们访问的是同一个端口。
+// ⚠️ 非 off 时各 Key 的 tier **保留不动**（只是被盖住）——
+//
+//	回 off 后自然恢复，不需要"存回来"这一步。
+//	这就是"记住各个 Key 的限制设置"的实现方式：
+//	设置从来没被改过，只是生效的优先级变了。
+func (k *Keys) SetGatewayTier(t LanTier) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.gatewayTier = t
+	k.rebuildGatewayLimiterLocked()
+}
+
+// List 返回全部 Key（不含 Key 本体）。
+func (k *Keys) List() []ApiKey {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	out := make([]ApiKey, 0, len(k.keys))
+	for _, k1 := range k.keys {
+		out = append(out, k1)
+	}
+	// 按创建时间排 —— 稳定的展示顺序。
+	for i := 0; i < len(out); i++ {
+		for j := i + 1; j < len(out); j++ {
+			if out[j].CreatedAt < out[i].CreatedAt {
+				out[i], out[j] = out[j], out[i]
+			}
+		}
+	}
+	return out
+}
+
+// Create 铸一把新 Key。
+//
+// ⚠️ label ≤ 6 字符（按字符数）—— 超长直接报错，
+//
+//	不悄悄截断（截断后的名字可能认不出是谁）。
+func (k *Keys) Create(label, tier string) (ApiKey, error) {
+	label = strings.TrimSpace(label)
+	if n := len([]rune(label)); n > MaxKeyLabelChars {
+		return ApiKey{}, errLabelTooLong(n)
+	}
+	t := ParseKeyTier(tier)
+	key := store.GenerateKey(KeyPrefix)
+	row := store.ApiKeyRow{
+		ID: store.GenerateKey("fmh-kid"), Key: key,
+		Label: label, Tier: string(t), Enabled: true,
+		CreatedAt: time.Now().UnixMilli(),
+	}
+	if err := k.db.PutApiKey(row); err != nil {
+		return ApiKey{}, err
+	}
+	out := ApiKey{
+		ID: row.ID, Key: key, Label: label, Tier: string(t),
+		Enabled: true, CreatedAt: row.CreatedAt,
+	}
+	k.mu.Lock()
+	k.keys[key] = out
+	k.rebuildLimiterLocked(out)
+	k.mu.Unlock()
+	return out, nil
+}
+
+// Update 改一把 Key 的标签 / 档位 / 开关。
+//
+// ⚠️ 不允许把**最后一把启用的 Key** 停掉 ——
+//
+//	那等于把自己锁在门外，所有 Agent 一起失效。
+//
+// ⚠️ 网关级不是 off 时**拒绝改档位** ——
+//
+//	此时档位被网关盖住，改了也不生效，用户会以为界面坏了；
+//	明确报错反而让他知道该先去关网关级限制。
+func (k *Keys) Update(id, label, tier string, enabled *bool) (ApiKey, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+
+	var target ApiKey
+	for _, k1 := range k.keys {
+		if k1.ID == id {
+			target = k1
+			break
+		}
+	}
+	if target.ID == "" {
+		return ApiKey{}, errKeyNotFound
+	}
+
+	if label != "" {
+		label = strings.TrimSpace(label)
+		if n := len([]rune(label)); n > MaxKeyLabelChars {
+			return ApiKey{}, errLabelTooLong(n)
+		}
+		target.Label = label
+	}
+	if tier != "" {
+		if k.gatewayTier != LanTierOff {
+			return ApiKey{}, errTierLocked
+		}
+		target.Tier = string(ParseKeyTier(tier))
+	}
+	if enabled != nil {
+		if !*enabled {
+			on := 0
+			for _, k1 := range k.keys {
+				if k1.Enabled && k1.ID != id {
+					on++
+				}
+			}
+			if on == 0 {
+				return ApiKey{}, errDisableLast
+			}
+		}
+		target.Enabled = *enabled
+	}
+	if err := k.db.PutApiKey(store.ApiKeyRow{
+		ID: target.ID, Key: target.Key, Label: target.Label,
+		Tier: target.Tier, Enabled: target.Enabled, CreatedAt: target.CreatedAt,
+	}); err != nil {
+		return ApiKey{}, err
+	}
+	k.keys[target.Key] = target
+	k.rebuildLimiterLocked(target)
+	return target, nil
+}
+
+// Rotate 轮换一把 Key —— 旧 Key 立即失效。
+func (k *Keys) Rotate(id string) (ApiKey, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+
+	var target ApiKey
+	for _, k1 := range k.keys {
+		if k1.ID == id {
+			target = k1
+			break
+		}
+	}
+	if target.ID == "" {
+		return ApiKey{}, errKeyNotFound
+	}
+
+	newKey := store.GenerateKey(KeyPrefix)
+	// 旧 Key 的限流器跟着删 —— 它已经不是 Key 了。
+	delete(k.limiters, target.Key)
+	delete(k.keys, target.Key)
+	target.Key = newKey
+	if err := k.db.PutApiKey(store.ApiKeyRow{
+		ID: target.ID, Key: newKey, Label: target.Label,
+		Tier: target.Tier, Enabled: target.Enabled, CreatedAt: target.CreatedAt,
+	}); err != nil {
+		return ApiKey{}, err
+	}
+	k.keys[newKey] = target
+	k.rebuildLimiterLocked(target)
+	if k.lanKey != "" && !k.keyExistsLocked(k.lanKey) {
+		k.lanKey = k.oldestLocked()
+	}
+	return target, nil
+}
+
+// keyExistsLocked 报告一把 Key 还在不在（调用方持锁）。
+func (k *Keys) keyExistsLocked(key string) bool {
+	_, ok := k.keys[key]
+	return ok
+}
+
+// Delete 删一把 Key。
+//
+// ⚠️ 不允许删**最后一把** —— 同 Update 的理由。
+func (k *Keys) Delete(id string) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+
+	var target ApiKey
+	for _, k1 := range k.keys {
+		if k1.ID == id {
+			target = k1
+			break
+		}
+	}
+	if target.ID == "" {
+		return errKeyNotFound
+	}
+	if len(k.keys) <= 1 {
+		return errDisableLast
+	}
+	if err := k.db.DeleteApiKey(id); err != nil {
+		return err
+	}
+	delete(k.keys, target.Key)
+	delete(k.limiters, target.Key)
+	if k.lanKey == target.Key {
+		k.lanKey = k.oldestLocked()
+	}
+	return nil
+}
+
+// RotateLanKey 轮换默认 Key（兼容旧接口 —— 管理台的旧按钮）。
+//
+// ⚠️ 旧接口语义是"只有一把 Key"—— 多 Key 下它轮换**默认那把**。
+func (k *Keys) RotateLanKey() string {
+	k.mu.RLock()
+	id := ""
+	for _, k1 := range k.keys {
+		if k1.Key == k.lanKey {
+			id = k1.ID
+			break
+		}
+	}
+	k.mu.RUnlock()
+	if id == "" {
+		return ""
+	}
+	out, err := k.Rotate(id)
+	if err != nil {
+		return ""
+	}
+	return out.Key
+}
+
+// MatchAny 校验一个 Key 是不是**启用的调用 Key**。
+//
+// ⚠️ 推理面用这个 —— 单端口下，LAN 里的 agent 拿的就是自己的那把，
+//
+//	而它们访问的是同一个端口。
+//
+// ⚠️ **停用的 Key 在这里被拒** —— 那正是"停用"的含义：
+//
+//	那台设备立刻失去调用权，不用等任何刷新。
 //
 // ⚠️ **管理面不用这个** —— 管理面用**密码**。
-// 那个区分保证了：LAN Key 泄露 = 白嫖额度，但进不了管理面。
 func (k *Keys) MatchAny(presented string) bool {
 	if presented == "" {
 		return false
 	}
-	lan := k.LanKey()
-	return subtle.ConstantTimeCompare([]byte(lan), []byte(presented)) == 1
-}
-
-// MatchLan 校验一个 Key 是不是 LAN Key。
-func (k *Keys) MatchLan(presented string) bool {
-	return k.matches(k.LanKey(), presented)
-}
-
-// matches 常数时间比较。
-// ⚠️ 必须用常数时间 —— 否则可以靠响应时间**逐字节猜出** Key。
-func (k *Keys) matches(expected, presented string) bool {
-	if expected == "" || presented == "" {
-		return false
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	for key, info := range k.keys {
+		if subtle.ConstantTimeCompare([]byte(key), []byte(presented)) == 1 {
+			return info.Enabled
+		}
 	}
-	return subtle.ConstantTimeCompare([]byte(expected), []byte(presented)) == 1
+	return false
 }
+
+// Allow 报告这把 Key 的这次请求能不能过限流。
+//
+// ⚠️ **两层限流的裁决点** ——
+//
+//	网关级 != off → 只看网关限流器（所有 Key 共用一个桶）。
+//	网关级 == off → 看这把 Key 自己的限流器（deep = nil，直接过）。
+//
+// ⚠️ **名额要在请求结束时归还**（`Release`）——
+//
+//	并发上限靠"占着名额才算并发"来算。
+func (k *Keys) Allow(presented string) bool {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	// ① 网关级优先 —— 非 off 时所有 Key 一视同仁。
+	if k.gatewayTier != LanTierOff {
+		if k.gatewayLimiter == nil {
+			return true // deep
+		}
+		return k.gatewayLimiter.allow()
+	}
+	// ② 单 Key 级。
+	l := k.limiters[presented]
+	if l == nil {
+		return true // deep / 未知 Key（鉴权那关已经拦过）
+	}
+	return l.allow()
+}
+
+// Release 归还并发名额。
+//
+// ⚠️ 与 Allow 用的**同一个限流器**才需要归还 ——
+//
+//	所以这里要重复一遍"网关 or 这把 Key"的判定。
+//	两处判定不一致的话，名额会被还到别的桶里，
+//	并发计数只涨不降，几轮之后全部请求被拒。
+func (k *Keys) Release(presented string) {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	if k.gatewayTier != LanTierOff {
+		if k.gatewayLimiter != nil {
+			k.gatewayLimiter.release()
+		}
+		return
+	}
+	if l := k.limiters[presented]; l != nil {
+		l.release()
+	}
+}
+
+// BearerOf 从请求里取出 Bearer Key。
+// 同时接受 `Authorization: Bearer <key>` 与 `x-api-key: <key>`
+// —— 后者是 Anthropic SDK 的习惯。
+func BearerOf(r *http.Request) string {
+	if h := r.Header.Get("Authorization"); h != "" {
+		if strings.HasPrefix(strings.ToLower(h), "bearer ") {
+			return strings.TrimSpace(h[7:])
+		}
+	}
+	return strings.TrimSpace(r.Header.Get("X-Api-Key"))
+}
+
+// —— 管理会话 ——
 
 // NewBootstrapToken 生成一个一次性登录令牌。
 // ⚠️ 它是**一次性**的，且有效期很短（10 分钟）。
@@ -255,7 +662,7 @@ func (k *Keys) InvalidateSession(id string) {
 }
 
 // InvalidateAllSessionsExcept 作废除某个之外的所有会话。
-// ⚠️ 轮换本机 Key 时用 —— 旧 Key 的持有者的会话必须一起失效。
+// ⚠️ 改密码时用 —— 旧密码持有者的会话必须一起失效。
 func (k *Keys) InvalidateAllSessionsExcept(keep string) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -264,23 +671,4 @@ func (k *Keys) InvalidateAllSessionsExcept(keep string) {
 			delete(k.sessions, id)
 		}
 	}
-}
-
-// SessionCount 返回当前会话数（给看板用）。
-func (k *Keys) SessionCount() int {
-	k.mu.RLock()
-	defer k.mu.RUnlock()
-	return len(k.sessions)
-}
-
-// BearerOf 从请求里取出 Bearer Key。
-// 同时接受 `Authorization: Bearer <key>` 与 `x-api-key: <key>`
-// —— 后者是 Anthropic SDK 的习惯。
-func BearerOf(r *http.Request) string {
-	if h := r.Header.Get("Authorization"); h != "" {
-		if strings.HasPrefix(strings.ToLower(h), "bearer ") {
-			return strings.TrimSpace(h[7:])
-		}
-	}
-	return strings.TrimSpace(r.Header.Get("X-Api-Key"))
 }

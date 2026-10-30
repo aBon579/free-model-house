@@ -1,10 +1,10 @@
 import { useMemo, useState } from 'react'
 import { Check, Copy, X } from 'lucide-react'
 import { PageTitle } from '../components/Shell'
-import { Card, CardBody, CardHeader, Notice, Badge, Button, cn } from '../components/ui'
+import { Card, CardBody, CardHeader, Badge, Button, cn } from '../components/ui'
 import { CopyField } from '../components/common'
 import { copyToClipboard } from '../lib/clipboard'
-import { useKeys, useSettings, useStatus } from '../api/client'
+import { useKeys, useStatus } from '../api/client'
 
 /** 各个 Agent 工具的接入片段。 */
 interface Target {
@@ -89,7 +89,6 @@ const targets: Target[] = [
 export function QuickStart() {
   const { data: keys, isLoading: keysLoading } = useKeys(false)
   const { data: status } = useStatus()
-  const { data: settings } = useSettings()
   const [active, setActive] = useState(targets[0].key)
   const [revealed, setRevealed] = useState(false)
   const { data: fullKeys } = useKeys(revealed)
@@ -104,8 +103,6 @@ export function QuickStart() {
   const activeTarget = targets.find((t) => t.key === active) ?? targets[0]
   const snippet = activeTarget.snippet(baseURL, lanKey)
 
-  const lanDisabled = settings ? !settings.lanEnabled : false
-
   return (
     <>
       <PageTitle
@@ -113,20 +110,12 @@ export function QuickStart() {
         description="把免费模型接进你的 Agent，只需要两步。"
       />
 
-      {lanDisabled ? (
-        <div className="mb-4">
-          <Notice tone="warn">
-            ⚠ 局域网推理当前已关闭 —— 去「设置」开启后，LAN 里的 Agent 才能用这把 Key。
-          </Notice>
-        </div>
-      ) : null}
-
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
         <div className="min-w-0 space-y-4">
-          {/* ① 局域网地址 */}
+          {/* ① 地址与默认 Key */}
           <Card>
             <CardHeader
-              title="① 局域网地址与密钥"
+              title="① 地址与 API Key"
               description="你的 Agent 需要这两样。"
             />
             <CardBody className="space-y-3">
@@ -138,7 +127,7 @@ export function QuickStart() {
               </div>
               <div>
                 <div className="mb-1.5 flex items-center gap-2 text-[12.5px] font-medium text-[var(--ink-2)]">
-                  局域网 Key
+                  默认 Key
                   <Badge tone="zen">免额度</Badge>
                 </div>
                 {keysLoading ? (
@@ -152,6 +141,20 @@ export function QuickStart() {
                     //   因为要显示完整 Key 就得**重新请求**后端（?reveal=1）。
                     //   不受控的话，组件会把拿到的明文又打回指纹。
                     revealed={revealed}
+                    // ⚠️ **打码时点复制必须复制完整 Key** ——
+                    //   `value` 在打码时是**指纹**（fmh-ada6…179e），
+                    //   不是 Key 本体。这里现取完整值进剪贴板，
+                    //   明文不进 DOM。
+                    getFullValue={async () => {
+                      const res = await fetch('/api/keys?reveal=1', {
+                        credentials: 'include',
+                      })
+                      const body = await res.json()
+                      if (!res.ok) throw new Error('取完整值失败')
+                      const lan = body?.lan?.value ?? ''
+                      if (!lan) throw new Error('取完整值失败')
+                      return lan as string
+                    }}
                   />
                 )}
                 <div className="mt-1.5 flex items-center gap-2">

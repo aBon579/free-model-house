@@ -120,7 +120,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 // Version 是版本号。
-const Version = "0.1.0"
+const Version = "0.1.1"
 
 // BuildStamp 是构建时间戳 —— 由 Dockerfile 用 -ldflags -X 注入。
 //

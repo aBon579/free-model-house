@@ -31,8 +31,6 @@ func TestLanTierParseLegacy(t *testing.T) {
 		"limited": LanTierLight,
 		// 旧的"全开"（不限量）→ 深度档。
 		"lan": LanTierDeep,
-		// 旧的"关闭"→ 最紧的一档。
-		"off": LanTierLight,
 		// 认不出来 → 标准档（**不是**最紧的）——
 		// 免得升级后局域网突然用不了。
 		"":        LanTierStandard,
@@ -45,19 +43,46 @@ func TestLanTierParseLegacy(t *testing.T) {
 	}
 }
 
-// TestNoOffTier 验证**没有"完全关闭"档**。
+// TestGatewayTierHasOff 验证**网关级**档位表里有 off（单 Key 分治）。
 //
-// ⚠️ 用户明确要求去掉"局域网内 Agent 完全用不了"这个选项 ——
+// ⚠️ off 只对网关级合法 ——
 //
-//	这个网关就是给局域网里的 agent 用的。
-func TestNoOffTier(t *testing.T) {
+//	网关不限制，各 Key 按自己的档位限流。
+func TestGatewayTierHasOff(t *testing.T) {
+	found := false
 	for _, tier := range LanTierAll {
-		if tier == "off" {
-			t.Fatal("档位列表里不该有 off")
+		if tier == LanTierOff {
+			found = true
 		}
 	}
-	if len(LanTierAll) != 3 {
-		t.Fatalf("该有 3 档，实际 %d", len(LanTierAll))
+	if !found {
+		t.Fatal("网关档位列表里该有 off")
+	}
+	if len(LanTierAll) != 4 {
+		t.Fatalf("网关该有 4 档（off/light/standard/deep），实际 %d", len(LanTierAll))
+	}
+}
+
+// TestKeyTierHasNoOff 验证**单 Key** 档位表里**没有** off。
+//
+// ⚠️ 单 Key 没有 off —— off 的语义是"网关不管"，那是网关级的事；
+//
+//	一把 Key 要不限就直接 deep。
+func TestKeyTierHasNoOff(t *testing.T) {
+	for _, tier := range KeyTierAll {
+		if tier == LanTierOff {
+			t.Fatal("单 Key 档位列表里不该有 off")
+		}
+	}
+	if len(KeyTierAll) != 3 {
+		t.Fatalf("单 Key 该有 3 档（light/standard/deep），实际 %d", len(KeyTierAll))
+	}
+}
+
+// TestParseKeyTierRejectsOff 验证单 Key 的 off 落到 deep。
+func TestParseKeyTierRejectsOff(t *testing.T) {
+	if got := ParseKeyTier("off"); got != LanTierDeep {
+		t.Fatalf("单 Key 的 off 该落到 deep，实际 %q", got)
 	}
 }
 

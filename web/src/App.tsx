@@ -19,10 +19,12 @@ import { QuickStart } from './pages/QuickStart'
 import { Models } from './pages/Models'
 import { Usage } from './pages/Usage'
 import { Sources } from './pages/Sources'
+import { Proxy } from './pages/Proxy'
+import { Access } from './pages/Access'
 import { Settings } from './pages/Settings'
 
 /** 路由表。 */
-const routes: RouteKey[] = ['quickstart', 'models', 'usage', 'sources', 'settings']
+const routes: RouteKey[] = ['quickstart', 'models', 'usage', 'sources', 'access', 'proxy', 'settings']
 
 /** 密码最少几位（必须与后端一致）。 */
 const MIN_PASSWORD_LEN = 8
@@ -107,6 +109,8 @@ function App() {
       {route === 'models' ? <Models /> : null}
       {route === 'usage' ? <Usage /> : null}
       {route === 'sources' ? <Sources /> : null}
+      {route === 'access' ? <Access /> : null}
+      {route === 'proxy' ? <Proxy /> : null}
       {route === 'settings' ? <Settings /> : null}
     </Shell>
   )

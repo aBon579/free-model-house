@@ -18,10 +18,39 @@ export function Usage() {
   const [range, setRange] = useState(30)
 
   const daily = useMemo(() => data?.daily ?? [], [data])
-  const maxTokens = useMemo(
-    () => Math.max(1, ...daily.map((d) => d.inputTokens + d.outputTokens)),
-    [daily],
-  )
+
+  /**
+   * 热力图数据 —— **固定 365 格，永远显示**。
+   *
+   * ⚠️ **从去年的今天排到今天** —— 最后一格永远是今天；
+   *   没有用量记录时也是 365 个灰格（那是信息："一年没用"），
+   *   不能因为没有记录就整块消失。
+   *
+   * ⚠️ **maxTokens 只按有数据的天算** ——
+   *   把 0 的天也算进 max 会把比例压低（0 永远不是最大值，
+   *   但参与 sqrt 分档后有效值会摊薄），所以先建索引再取极值。
+   */
+  const heat = useMemo(() => {
+    const byDay = new Map<string, (typeof daily)[number]>()
+    for (const d of daily) byDay.set(d.day, d)
+
+    // 今天的日期串（本地时区）—— 与后端记 `day` 的方式一致。
+    const now = new Date()
+    const p = (n: number) => String(n).padStart(2, '0')
+    const today = `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}`
+
+    // 从今天起往前数 365 天（含今天）—— 最后一格 = 今天。
+    const days: Array<{ day: string; total: number }> = []
+    for (let i = 364; i >= 0; i--) {
+      const d = new Date(now)
+      d.setDate(d.getDate() - i)
+      const key = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+      const rec = byDay.get(key)
+      days.push(rec ? { day: key, total: rec.inputTokens + rec.outputTokens } : { day: key, total: 0 })
+    }
+    const maxTokens = Math.max(1, ...days.map((d) => d.total))
+    return { days, maxTokens, today }
+  }, [daily])
 
   return (
     <>
@@ -52,7 +81,7 @@ export function Usage() {
 
       {isLoading ? (
         <Loading label="读取用量" />
-      ) : !data || data.total.requests === 0 ? (
+      ) : !data ? (
         <Card>
           <Empty
             icon={<Activity size={26} />}
@@ -79,7 +108,7 @@ export function Usage() {
                 value={data.total.failed}
                 tone={data.total.failed > 0 ? 'warn' : undefined}
               />
-              {/* ⚠️ 费用只有 OpenRouter 报 ——
+              {/* ⚠️ 花费只有 OpenRouter 报 ——
                   免密车道永远是 0，所以没花过钱时不显示。 */}
               {(data.total.costUsd ?? 0) > 0 ? (
                 <Stat
@@ -92,65 +121,67 @@ export function Usage() {
             </CardBody>
           </Card>
 
-          {/* ⚠️ **热力图** —— 不用柱状图。
+          {/* ⚠️ **热力图** —— 固定 365 格，从去年的今天排到今天，
+              最后一格永远是今天。
 
-              为什么：柱状图在 30 天 × 稀疏数据时**大部分格子是空的**，
-              而且"高矮"要靠眼睛比对坐标轴；
-              热力图直接用**颜色深浅**表达量级，一眼看出
-              "哪天忙、哪天闲"。
+              ⚠️ **格子连续排** —— 不分月、没有月份标签，
+              只是一串 365 个方块；一行放几个由容器宽度自己决定
+              （auto-fill），最后一行不满是正常的。
 
-              ⚠️ **格子是方块**（不是竖条）——
-                 竖条只是换个画法的柱状图，方块才像热力图。 */}
+              ⚠️ **永远显示** —— 没有用量记录时也显示
+              （全灰的 365 格），那本身是信息："一整年都没用"。 */}
           <Card>
             <CardHeader
               title="Token 用量"
-              description="按天。输入 + 输出。颜色越深用得越多。"
+              description="近一年 365 天。输入 + 输出。颜色越深用得越多；灰格 = 那天没有用量。"
             />
             <CardBody>
-              {daily.length === 0 ? (
-                <div className="py-8 text-center text-[12.5px] text-[var(--ink-3)]">
-                  这个区间没有数据
-                </div>
-              ) : (
-                <>
-                  <div className="flex flex-wrap gap-[3px]">
-                    {daily.map((d) => {
-                      const total = d.inputTokens + d.outputTokens
-                      const level = heatLevel(total, maxTokens)
-                      return (
-                        <div
-                          key={d.day}
-                          className="group relative"
-                          title={`${d.day} · ${formatTokens(total)} token`}
-                        >
-                          <div
-                            className="h-[15px] w-[15px] rounded-[3px] transition-colors duration-150 group-hover:ring-2 group-hover:ring-[var(--accent)]"
-                            style={heatColor(level)}
-                          />
-                          <div className="pointer-events-none absolute bottom-full left-1/2 z-10 mb-1 hidden -translate-x-1/2 whitespace-nowrap rounded-[var(--r-sm)] bg-[var(--ink)] px-2 py-1 text-[11px] text-[var(--surface)] group-hover:block">
-                            {d.day} · {formatTokens(total)} token
-                          </div>
-                        </div>
-                      )
-                    })}
-                  </div>
-                  {/* 图例 —— 没有它，颜色深浅没有意义。 */}
-                  <div className="mt-3 flex items-center gap-2 text-[11px] text-[var(--ink-3)]">
-                    <span>少</span>
-                    {[0, 1, 2, 3, 4].map((lv) => (
-                      <div
-                        key={lv}
-                        className="h-[11px] w-[11px] rounded-[2px]"
-                        style={heatColor(lv)}
-                      />
-                    ))}
-                    <span>多</span>
-                    <span className="ml-auto">
-                      {daily[0]?.day ?? ''} → {daily[daily.length - 1]?.day ?? ''}
-                    </span>
-                  </div>
-                </>
-              )}
+              <div
+                className="grid gap-[3px]"
+                style={{
+                  gridTemplateColumns:
+                    'repeat(auto-fill, minmax(13px, 1fr))',
+                  // ⚠️ 格子必须保持正方形 —— 用 aspect-ratio，
+                  //   宽度自适应、高度跟着宽度走。
+                  //   minmax(13px, 1fr)：最窄 13px（保证手指能点到），
+                  //   有富余就摊开，一行塞满为止。
+                }}
+              >
+                {heat.days.map((d) => {
+                  const level = heatLevel(d.total, heat.maxTokens)
+                  const isToday = d.day === heat.today
+                  return (
+                    <div
+                      key={d.day}
+                      title={`${d.day} · ${formatTokens(d.total)} token`}
+                      className="aspect-square rounded-[2px] transition-colors duration-150 hover:ring-2 hover:ring-[var(--accent)]"
+                      style={{
+                        ...heatColor(level),
+                        // ⚠️ **今天描边** —— 最后一格永远是今天，
+                        //   描个边让人知道"时间轴到这儿为止"。
+                        ...(isToday
+                          ? { boxShadow: 'inset 0 0 0 1px var(--accent)' }
+                          : {}),
+                      }}
+                    />
+                  )
+                })}
+              </div>
+              {/* 图例 —— 没有它，颜色深浅没有意义。 */}
+              <div className="mt-3 flex items-center gap-2 text-[11px] text-[var(--ink-3)]">
+                <span>少</span>
+                {[0, 1, 2, 3, 4].map((lv) => (
+                  <div
+                    key={lv}
+                    className="h-[11px] w-[11px] rounded-[2px]"
+                    style={heatColor(lv)}
+                  />
+                ))}
+                <span>多</span>
+                <span className="ml-auto">
+                  {heat.days[0]?.day ?? ''} → 今天
+                </span>
+              </div>
             </CardBody>
           </Card>
 
@@ -171,7 +202,7 @@ export function Usage() {
                     <th scope="col" className="px-3 py-2 text-right">输入</th>
                     <th scope="col" className="px-3 py-2 text-right">输出</th>
                     <th scope="col" className="px-3 py-2 text-right">失败</th>
-                    <th scope="col" className="px-3 py-2 text-right">花费</th>
+                    <th scope="col" className="px-3 py-2 text-right">最近调用</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -208,14 +239,10 @@ export function Usage() {
                             <span className="text-[var(--ink-3)]">0</span>
                           )}
                         </td>
-                        {/* ⚠️ 花费 —— **只有 OpenRouter 报**。
-                            免密车道永远是 0，所以显示"—"。 */}
-                        <td className="tnum px-3 py-2 text-right">
-                          {(m.costUsd ?? 0) > 0 ? (
-                            <span title="OpenRouter 账户扣费">{formatCost(m.costUsd ?? 0)}</span>
-                          ) : (
-                            <span className="text-[var(--ink-3)]">—</span>
-                          )}
+                        {/* ⚠️ **最近调用** —— 代替了原来的"花费"列。
+                            后端已按 lastUsedAt 降序 —— 最新调用的永远在第一行。 */}
+                        <td className="tnum px-3 py-2 text-right whitespace-nowrap text-[var(--ink-3)]">
+                          {formatLastUsed(m.lastUsedAt)}
                         </td>
                       </tr>
                     )
@@ -235,6 +262,25 @@ function formatTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
   if (n >= 1000) return `${(n / 1000).toFixed(1)}K`
   return String(n)
+}
+
+/**
+ * 格式化"最近调用时间"。
+ *
+ * ⚠️ **24 小时内显示"X 分钟/小时前"** —— 用户要的是"刚用过没有"；
+ *   更早的显示日期（MM-DD HH:mm）—— 超过一天精确到分钟就够了，
+ *   表格里放"星期二 14:23"那种长格式会把列撑爆。
+ */
+function formatLastUsed(ms: number): string {
+  if (!ms) return '—'
+  const age = Date.now() - ms
+  if (age < 0) return '刚刚'
+  if (age < 60_000) return '刚刚'
+  if (age < 3_600_000) return `${Math.floor(age / 60_000)} 分钟前`
+  if (age < 86_400_000) return `${Math.floor(age / 3_600_000)} 小时前`
+  const d = new Date(ms)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
 
 /**

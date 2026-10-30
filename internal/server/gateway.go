@@ -30,17 +30,6 @@ type Gateway struct {
 	onUsage func(lane.UsageRecord)
 	// requestTimeout 是单次请求的上限。
 	requestTimeout time.Duration
-	// lanEnabled 是局域网推理的开关。
-	// ⚠️ 关掉它之后，**LAN Key 也不能推理** —— 但**本机 Key 仍然可以**（管理台还要用）。
-	// 这就是"局域网推理"这个开关的准确语义：关掉它 = 只允许本机使用。
-	lanEnabled bool
-	// lanTier 是局域网访问档位（off / limited / lan）。
-	// ⚠️ 这是 `lanEnabled` 的**细化** —— 旧字段保留是为了兼容，
-	//   但真正的判断以 tier 为准。
-	lanTier LanTier
-	// limiter 是"limited"档的限流器。
-	// ⚠️ nil = 不限流。
-	limiter *limiter
 	// mu 保护可变开关。
 	mu sync.Mutex
 }
@@ -53,97 +42,11 @@ func NewGateway(router *lane.Router, catalog *lane.Catalog, lanes *lane.Registry
 		lanes:          lanes,
 		keys:           keys,
 		requestTimeout: 300 * time.Second,
-		// ⚠️ 默认**开启**局域网推理 —— 与存储层的默认值一致。
-		// 真的关掉时，main 会显式调用 SetLanEnabled(false)。
-		lanEnabled: true,
 	}
 }
 
 // SetUsageHook 设置用量回调。
 func (g *Gateway) SetUsageHook(fn func(lane.UsageRecord)) { g.onUsage = fn }
-
-// SetLanEnabled 开关局域网推理（兼容旧接口）。
-//
-// ⚠️ 现在**没有"关闭"档** —— 所以 false 映射到最紧的一档（light），
-//
-//	而不是完全禁用。
-func (g *Gateway) SetLanEnabled(v bool) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.lanEnabled = v
-	if v {
-		if g.lanTier == "" {
-			g.lanTier = LanTierStandard
-		}
-	} else {
-		g.lanTier = LanTierLight
-	}
-}
-
-// LanEnabled 返回局域网推理开关的状态。
-func (g *Gateway) LanEnabled() bool {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.lanEnabled
-}
-
-// SetLanTier 设置局域网访问档位。
-//
-// ⚠️ `perMinute` <= 0 或 `maxConcurrent` <= 0 → 不限流。
-func (g *Gateway) SetLanTier(t LanTier, perMinute int, maxConcurrent int) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.lanTier = t
-	g.lanEnabled = true
-	if t == LanTierDeep {
-		// 深度档 = 不限量 → 不要限流器。
-		g.limiter = nil
-	} else {
-		g.limiter = newLimiter(perMinute, maxConcurrent)
-	}
-}
-
-// LanTier 返回当前档位。
-func (g *Gateway) LanTier() LanTier {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.lanTier == "" {
-		return LanTierStandard
-	}
-	return g.lanTier
-}
-
-// LanStats 返回限流器状态（给管理台显示）。
-func (g *Gateway) LanStats() (tokens float64, inFlight int, limited bool) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.limiter == nil {
-		return 0, 0, false
-	}
-	t, in := g.limiter.stats()
-	return t, in, true
-}
-
-// takeLimitSlot 试占一个限流名额。
-func (g *Gateway) takeLimitSlot() bool {
-	g.mu.Lock()
-	l := g.limiter
-	g.mu.Unlock()
-	if l == nil {
-		return true
-	}
-	return l.allow()
-}
-
-// releaseLimitSlot 释放限流名额。
-func (g *Gateway) releaseLimitSlot() {
-	g.mu.Lock()
-	l := g.limiter
-	g.mu.Unlock()
-	if l != nil {
-		l.release()
-	}
-}
 
 // Routes 返回推理面的路由处理函数。
 func (g *Gateway) Routes() http.Handler {
@@ -184,27 +87,20 @@ func (g *Gateway) handle(next http.HandlerFunc) http.HandlerFunc {
 			writeOpenAIError(w, http.StatusUnauthorized, "invalid_request_error", "missing or invalid API key")
 			return
 		}
-		// ⚠️ **局域网推理的档位** ——
+		// ⚠️ **两层限流** —— Keys.Allow 里裁决：
 		//
-		//   `light` / `standard` —— 过限流。
-		//   `deep` —— 不限量。
+		//	网关级 != off → 所有 Key 共用网关的桶（强制跟随）
+		//	网关级 == off → 这把 Key 自己的桶（deep = 不限）
 		//
-		// ⚠️ **没有"完全关闭"档** —— 这个网关就是给局域网里的 agent 用的。
-		//   要限制接入就换 Key 或用防火墙。
-		//
-		// ⚠️ 之前"本机 Key 免限流" —— **本机 Key 已砍掉**，
-		//   所以现在**所有**推理请求都走同一套限额。
-		if g.LanTier() != LanTierDeep {
-			// ⚠️ 拿不到名额就 429 —— 客户端会退避重试，
-			//   比 403 好（403 会让它直接放弃）。
-			if !g.takeLimitSlot() {
-				w.Header().Set("Retry-After", "10")
-				writeOpenAIError(w, http.StatusTooManyRequests, "rate_limit_error",
-					"局域网推理已达限流上限（每个 Key 都一样）—— 稍后重试")
-				return
-			}
-			defer g.releaseLimitSlot()
+		// ⚠️ 拿不到名额就 429 —— 客户端会退避重试，
+		//   比 403 好（403 会让它直接放弃）。
+		if !g.keys.Allow(presented) {
+			w.Header().Set("Retry-After", "10")
+			writeOpenAIError(w, http.StatusTooManyRequests, "rate_limit_error",
+				"已达限流上限 —— 稍后重试")
+			return
 		}
+		defer g.keys.Release(presented)
 		// 请求 id —— 客户端可以自带，这样两边日志能对上。
 		reqID := requestIDOf(r)
 		w.Header().Set("X-FMH-Request-Id", reqID)
@@ -240,6 +136,11 @@ func (g *Gateway) serveModels(w http.ResponseWriter, r *http.Request) {
 	data := make([]map[string]any, 0, len(models))
 	for _, m := range models {
 		if !m.Enabled {
+			continue
+		}
+		// ⚠️ **关闭的车道不出现** —— agent 拿到的清单就是它能调用的集合；
+		//   列一个"其实调不到"的模型只会让它白白重试。
+		if !g.router.LaneEnabled(m.Lane) {
 			continue
 		}
 		entry := map[string]any{

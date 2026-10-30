@@ -83,6 +83,17 @@ func NewRouter(catalog *Catalog, lanes *Registry, throttle *Book) *Router {
 // SetLaneSwitches 装上车道开关。
 func (r *Router) SetLaneSwitches(s *LaneSwitches) { r.switches = s }
 
+// LaneEnabled 报告一条车道开不开。
+//
+// ⚠️ 给推理面的 `/v1/models` 用 —— 关闭的车道连清单都不该出现。
+// nil 开关组 = 全开（还没初始化时的兜底）。
+func (r *Router) LaneEnabled(laneID string) bool {
+	if r.switches == nil {
+		return true
+	}
+	return r.switches.Enabled(laneID)
+}
+
 // SetAutoModelSwitch 开关「自动跨模型调用」。
 func (r *Router) SetAutoModelSwitch(allow bool) { r.allowModelSwitch = allow }
 
