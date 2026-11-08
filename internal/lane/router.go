@@ -2,8 +2,10 @@ package lane
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -60,6 +62,14 @@ type Router struct {
 	// ⚠️ **关掉的车道的模型不进候选链** —— 那条车道的模型
 	//   仍然显示在清单里（用户能看到它存在），但不会被路由选中。
 	switches *LaneSwitches
+	// planModels 是**计划性调用列表**（最多 3 个槽位，按优先级排列）。
+	//
+	// ⚠️ 只在**自动跨模型回落**开启时生效：
+	//   请求的模型失败后，按这里的槽位顺序依次回落；
+	//   三个槽位都不可用时，才回到原先的"模型池"回落规则。
+	planModels []string
+	// mu 保护可变设置。
+	mu sync.RWMutex
 }
 
 func NewRouter(catalog *Catalog, lanes *Registry, throttle *Book) *Router {
@@ -96,6 +106,29 @@ func (r *Router) LaneEnabled(laneID string) bool {
 
 // SetAutoModelSwitch 开关「自动跨模型调用」。
 func (r *Router) SetAutoModelSwitch(allow bool) { r.allowModelSwitch = allow }
+
+// SetPlanModels 设置**计划性调用列表**（按优先级排列，最多 3 个）。
+//
+// ⚠️ 传空 = 不用计划列表，回落到原有模型池规则。
+func (r *Router) SetPlanModels(models []string) {
+	out := make([]string, 0, len(models))
+	for _, m := range models {
+		if strings.TrimSpace(m) == "" {
+			continue
+		}
+		out = append(out, m)
+	}
+	r.mu.Lock()
+	r.planModels = out
+	r.mu.Unlock()
+}
+
+// planModelList 返回计划列表副本。
+func (r *Router) planModelList() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return append([]string(nil), r.planModels...)
+}
 
 // ThrottleRows 导出限流账本（供持久化）。
 func (r *Router) ThrottleRows() []ThrottleRow {
@@ -164,16 +197,9 @@ func (r *Router) BuildCandidates(requestedLane, requestedModel string, needs Nee
 	models := r.catalog.Models()
 
 	// 解析请求的模型。
-	laneID, upstream := ParseModelID(requestedModel)
-	if laneID == "" {
-		laneID = requestedLane
-	}
-	if laneID == "" {
-		laneID = ResolveLaneForModel(models, upstream)
-	}
-	if laneID == "" {
-		laneID = ZenLaneID
-	}
+	// ⚠️ **解析规则只在这里定义一次** —— `Complete` 判"原车道"时也用它，
+	//   否则两处口径不一致就会出现"候选被排到别的车道，原车道判定却还怪着"的错乱。
+	laneID, upstream, strict := r.resolveTarget(requestedLane, requestedModel)
 
 	out := make([]candidate, 0, len(models))
 	for i, m := range models {
@@ -252,19 +278,21 @@ func (r *Router) BuildCandidates(requestedLane, requestedModel string, needs Nee
 	//   换模型是"它不行之后"的事，不是"一开始就换"。
 	if r.allowModelSwitch {
 		out = orderLanesForSwitch(out, laneID)
+		// ⚠️ **计划性调用列表优先** —— 三个槽位按优先级排在池子前面；
+		//   三个都不可用时保持原有顺序（即"回落到原规则"）。
+		out = r.orderPlanModels(out)
 	}
 
 	// 请求的模型提到最前。
-	requested := laneID + "/" + upstream
-	for i := range out {
-		// ⚠️ `out[i].Model` 是**裸名**，`out[i].Full` 是**全名**。
-		if out[i].Full == requested || out[i].Model == upstream {
-			// 把它换到最前（保持其余相对顺序）。
-			c := out[i]
-			copy(out[1:i+1], out[0:i])
-			out[0] = c
-			break
-		}
+	//
+	// ⚠️⚠️ **必须"先精确全名，再同车道同名，最后才跨车道同名"** ——
+	//   只用裸名匹配（`Model == upstream`）会在**同名模型存在于多条车道**时
+	//   把排序更靠前的**别的车道**提到第一位，于是请求被静默路由到错误的车道；
+	//   关闭「自动跨模型调用」时又会因为它不在"原车道"而直接被拒。
+	if idx := pickRequested(out, laneID, upstream); idx > 0 {
+		c := out[idx]
+		copy(out[1:idx+1], out[0:idx])
+		out[0] = c
 	}
 
 	// ⚠️⚠️ **「自动跨模型调用」关闭时 —— 候选链只剩请求的模型。**
@@ -282,8 +310,24 @@ func (r *Router) BuildCandidates(requestedLane, requestedModel string, needs Nee
 	//
 	//   那不是用户要的：用户要的是"我指名了哪个模型，
 	//   就用哪个；它不行就明说不行"。
+	// ⚠️⚠️ **前缀/显式指定命中了真实车道 → 只在这条车道的候选里挑。**
+	//
+	//   同名的其他车道模型必须清掉 —— 这正是"kilo/xxx 被静默送到 zen"的路径：
+	//   Kilo 清单里没有这个模型（或它被能力/容量过滤掉）时，
+	//   跨车道的同名模型会顶上来，成为默认落点。
+	//
+	//   关闭自动跨模型 → 该车道没有候选就明确失败（不再静默换车道）；
+	//   开启 → 允许把其他车道作为**用户已授权的**回落。
+	if strict {
+		if !r.allowModelSwitch {
+			return restrictToRequestedStrict(out, laneID, upstream)
+		}
+		// 开启时保留全部候选 —— 请求的模型已被 pickRequested 提到第一位。
+		return out
+	}
+
 	if !r.allowModelSwitch {
-		return restrictToRequested(out, requested, upstream)
+		return restrictToRequested(out, laneID, upstream)
 	}
 	return out
 }
@@ -326,6 +370,72 @@ func orderLanesForSwitch(cands []candidate, originLane string) []candidate {
 	return cands
 }
 
+// orderPlanModels 把**计划性调用列表**里的可用模型按槽位顺序提到前面。
+//
+// ⚠️ **"不可用"的口径** —— 与路由实际会跳过的口径一致：
+//   - 车道没就绪（没有凭据/关闭）→ 不可用
+//   - 探测结论是**新鲜的负面结论**（限流/区域封锁/不可用）→ 不可用
+//   - 限流账本里正在冷却 → 不可用
+//
+// ⚠️ 三个槽位都不在候选链里（或都不可用）→ **原样返回**，
+//
+//	落回原有模型池顺序。这保证"计划列表"永远不会把池子缩成空。
+func (r *Router) orderPlanModels(cands []candidate) []candidate {
+	plan := r.planModelList()
+	if len(plan) == 0 || len(cands) < 2 {
+		return cands
+	}
+	byFull := map[string]candidate{}
+	for _, c := range cands {
+		byFull[c.Full] = c
+	}
+	planned := make([]candidate, 0, len(plan))
+	used := map[string]bool{}
+	for _, full := range plan {
+		c, ok := byFull[full]
+		if !ok || used[c.Full] || !r.planCandidateUsable(c) {
+			continue
+		}
+		used[c.Full] = true
+		planned = append(planned, c)
+	}
+	if len(planned) == 0 {
+		return cands
+	}
+	out := make([]candidate, 0, len(cands))
+	out = append(out, planned...)
+	for _, c := range cands {
+		if !used[c.Full] {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// planCandidateUsable 报告一个计划槽位的模型当前可不可用。
+func (r *Router) planCandidateUsable(c candidate) bool {
+	// ① 车道就绪。
+	if r.lanes != nil {
+		if l, ok := r.lanes.Get(c.Lane); ok && !l.Ready() {
+			return false
+		}
+	}
+	// ② 限流账本冷却中。
+	if r.throttle != nil && r.throttle.Throttled(c.Full) {
+		return false
+	}
+	// ③ 新鲜的负面探测结论。
+	if p := r.catalog.Probe(c.Full); p.Fresh(ProbeTTL) {
+		switch p.State {
+		case StateAvailable, StateUnknown:
+			return true
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // sleepCtx 等一段时间，但**能被 ctx 取消**。
 //
 // ⚠️ 必须用 ctx 版 —— 用户取消请求时，重试等待要立刻结束。
@@ -351,13 +461,73 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 //
 //	那样路由器会报"没有可用的模型"，而不是**偷偷换一个**。
 //	这正是"关闭 = 不换模型"的含义。
-func restrictToRequested(cands []candidate, requested, upstream string) []candidate {
+//
+// ⚠️ 匹配顺序与 `pickRequested` 一致：**全名 → 同车道同名 → 跨车道同名**。
+//
+//	只有前两级都落空时，才退到跨车道同名（目录刷新导致前缀变化时的兜底）。
+func restrictToRequested(cands []candidate, laneID, upstream string) []candidate {
+	if i := pickRequested(cands, laneID, upstream); i >= 0 {
+		return cands[i : i+1]
+	}
+	return nil
+}
+
+// restrictToRequestedStrict 是**前缀锁定车道**时的候选裁剪。
+//
+// ⚠️ 与 `restrictToRequested` 的唯一差别：**没有第 ③ 步跨车道同名兜底**。
+//
+//	用户点名 `kilo/xxx` 时，zen 的同名模型不允许顶上来 ——
+//	那种"兜底"正是把请求静默送到 zen 的根因。
+//
+// 没有候选 → 返回 nil，上层会给出"车道 kilo 不可用/模型不存在"的明确错误。
+func restrictToRequestedStrict(cands []candidate, laneID, upstream string) []candidate {
+	if laneID == "" {
+		return restrictToRequested(cands, laneID, upstream)
+	}
+	requested := laneID + "/" + upstream
 	for i := range cands {
-		if cands[i].Full == requested || cands[i].Model == upstream {
+		if cands[i].Lane == laneID && cands[i].Full == requested {
+			return cands[i : i+1]
+		}
+	}
+	for i := range cands {
+		if cands[i].Lane == laneID && cands[i].Model == upstream {
 			return cands[i : i+1]
 		}
 	}
 	return nil
+}
+
+// pickRequested 在候选链里定位**请求的那个模型**。
+//
+// ⚠️ 为什么不能只比裸名 ——
+//
+//	`zen/mimo-v2.6-flash-free` 与 `kilo/mimo-v2.6-flash-free` 的裸名相同，
+//	只比裸名时，"排序靠前的那个车道"会抢走请求，
+//	于是用户点名的模型被**静默路由到另一条车道**（同名不同上游，行为/额度都不同）。
+//
+//	所以优先级是：
+//	  ① 全名完全一致（`车道/模型`）
+//	  ② 同一车道 + 同名
+//	  ③ 其他车道的同名（仅在目录里查不到原车道时兜底）
+func pickRequested(cands []candidate, laneID, upstream string) int {
+	requested := laneID + "/" + upstream
+	for i := range cands {
+		if cands[i].Full == requested {
+			return i
+		}
+	}
+	for i := range cands {
+		if cands[i].Lane == laneID && cands[i].Model == upstream {
+			return i
+		}
+	}
+	for i := range cands {
+		if cands[i].Model == upstream {
+			return i
+		}
+	}
+	return -1
 }
 
 // scoreFor 给一个模型算排序键。
@@ -439,6 +609,25 @@ type TurnResult struct {
 	Attempts int
 	// Failed 记录每次失败的候选与错误。
 	Failed []AttemptFailure
+	// Resolution 是本次请求的**解码路径**（前缀锁定 / 目录匹配 / 未命中）。
+	//
+	// ⚠️ 排障时必须能看到"这条请求是怎么被解析到车道的" ——
+	//   否则同名模型跨车道的问题只能靠猜。
+	Resolution string
+	// Attempted 是**每一次物理尝试**的落点与结果（成功 / 失败都记）。
+	//
+	// ⚠️ 失败请求也要能回答"到底试了哪条车道、哪个上游模型" ——
+	//   只靠 `Failed` 时，日志里只剩"实际= 车道=?"，用户没法核对。
+	Attempted []AttemptLog
+}
+
+// AttemptLog 记录一次物理尝试。
+type AttemptLog struct {
+	Lane  string
+	Model string // 上游裸 id（`kilo/xxx` 里的 `xxx`）
+	Full  string // 对外全名（`车道/上游`）
+	// Result 是这一试的结果摘要：`成功` 或 `失败(错误码): 上游原文`。
+	Result string
 }
 
 // AttemptFailure 记录一次失败的尝试。
@@ -467,10 +656,36 @@ func (r *Router) Complete(ctx context.Context, turn *Turn, emit func(Chunk), com
 	cands := r.BuildCandidates(turn.Lane, turn.Model, needs)
 
 	// ⚠️ **请求原本要的车道** —— 判断"要不要换"的基准。
-	//   没有它，"这个候选是不是另一个车道"就没法判断。
-	originLane := resolveOriginLane(turn.Lane, turn.Model, cands)
+	//   必须与 `BuildCandidates` 用**同一个解析**，
+	//   否则同名模型跨车道时会出现"候选排到了 A、许可却认为原车道是 B"。
+	originLane, upstream, strict := r.resolveTarget(turn.Lane, turn.Model)
+	// 裸名走目录匹配时，落点由目录决定 —— 用候选链首项定"原车道"。
+	if !strict && originLane == "" && len(cands) > 0 {
+		originLane = cands[0].Lane
+	}
 
-	result := &TurnResult{Attempts: 0}
+	resolution := decodePath(strict, originLane, upstream)
+	// ⚠️ 前缀锁定但该车道没有这个模型时，解码行必须**当场说清** ——
+	//   否则日志显示"前缀锁定 → kilo/xxx"，实际却由别的车道应答。
+	if strict && originLane != "" {
+		switch {
+		case len(cands) == 0:
+			resolution += "（该车道没有可用候选）"
+		case cands[0].Lane != originLane:
+			resolution += "（该车道无此模型，已回落 " + cands[0].Lane + "）"
+		}
+	}
+	result := &TurnResult{Attempts: 0, Resolution: resolution}
+
+	// ⚠️ 每一次物理尝试都要留证据（成功 / 失败都记）。
+	noteAttempt := func(c *candidate, e *Error) {
+		a := AttemptLog{Lane: c.Lane, Model: c.Model, Full: c.Full, Result: "成功"}
+		if e != nil {
+			a.Result = "失败(" + string(e.Code) + "): " + e.Message
+		}
+		result.Attempted = append(result.Attempted, a)
+	}
+
 	start := time.Now()
 	slowBudgetUsed := int64(0)
 	quotaBudgetUsed := int64(0)
@@ -551,6 +766,7 @@ func (r *Router) Complete(ctx context.Context, turn *Turn, emit func(Chunk), com
 
 		result.Attempts++
 		usage, finish, uerr := l.Do(ctx, &attempt, emit)
+		noteAttempt(cand, uerr)
 		if uerr == nil {
 			result.Usage = usage
 			result.Finish = finish
@@ -588,6 +804,8 @@ func (r *Router) Complete(ctx context.Context, turn *Turn, emit func(Chunk), com
 
 		// 已经吐过内容 → 不能换，只能把错误交出去。
 		if committed != nil && committed() {
+			// ⚠️ 失败也要留下落点 —— 日志的 `实际=`/`车道=` 靠它。
+			result.Lane, result.Model = cand.Lane, cand.Full
 			return result, uerr
 		}
 
@@ -622,11 +840,13 @@ func (r *Router) Complete(ctx context.Context, turn *Turn, emit func(Chunk), com
 			})
 			// 等一小会儿再试 —— 立刻重试往往还是同样的错。
 			if err := sleepCtx(ctx, r.sameModelRetryDelay); err != nil {
+				result.Lane, result.Model = cand.Lane, cand.Full
 				return result, uerr
 			}
 			// ⚠️ **再试同一个候选**。
 			result.Attempts++
 			usage, finish, rerr := l.Do(ctx, &attempt, emit)
+			noteAttempt(cand, rerr)
 			if rerr == nil {
 				result.Usage = usage
 				result.Finish = finish
@@ -645,6 +865,7 @@ func (r *Router) Complete(ctx context.Context, turn *Turn, emit func(Chunk), com
 
 		// 不可切换 → 立即返回。
 		if !uerr.Switchable() {
+			result.Lane, result.Model = cand.Lane, cand.Full
 			return result, uerr
 		}
 
@@ -688,10 +909,49 @@ func (r *Router) Complete(ctx context.Context, turn *Turn, emit func(Chunk), com
 	}
 
 	// 候选链走完了。
+	// ⚠️ 失败也要留下"最后落在哪" —— 日志的 `实际=`/`车道=` 靠它。
+	if result.Lane == "" {
+		switch {
+		case len(result.Failed) > 0:
+			last := result.Failed[len(result.Failed)-1]
+			result.Lane, result.Model = last.Lane, last.Model
+		case originLane != "":
+			result.Lane = originLane
+			result.Model = FormatModelID(originLane, upstream)
+		default:
+			result.Model = upstream
+		}
+	}
 	if len(result.Failed) == 0 {
+		var msg string
+		switch {
+		case strict:
+			// ⚠️ 必须说清**为什么**：车道不存在 / 未就绪 / 模型不在池里。
+			laneKnown, laneReady := false, false
+			if r.lanes != nil {
+				if l, ok := r.lanes.Get(originLane); ok {
+					laneKnown, laneReady = true, l.Ready()
+				}
+			}
+			switch {
+			case !laneKnown:
+				msg = fmt.Sprintf("前缀锁定到车道 %s，但该车道不存在 —— 模型 %s 无法调用", originLane, upstream)
+			case !laneReady:
+				msg = fmt.Sprintf("前缀锁定到车道 %s，但该车道未配置或未就绪（没有凭据/已关闭）—— 模型 %s 无法调用，不会换到其他车道", originLane, upstream)
+			default:
+				msg = fmt.Sprintf("前缀锁定到车道 %s，但模型 %s 不在该车道的可用模型池（可能不是免费模型、被过滤或清单尚未刷新）—— 不会改用其他车道的同名模型", originLane, upstream)
+			}
+		case originLane != "":
+			msg = fmt.Sprintf("模型 %s 当前不可用（目录把它解析到车道 %s，但该车道未就绪/已关闭，或不在模型池中）", upstream, originLane)
+		default:
+			msg = fmt.Sprintf("模型 %s 无法解析 —— 模型名没有车道前缀（形如 kilo/模型名），目录里也没有这个模型", upstream)
+		}
+		if !r.allowModelSwitch {
+			msg += "；未开启「自动跨模型调用」，不会回落到其他模型"
+		}
 		return result, &Error{
 			Code:    CodeServer,
-			Message: "没有可用的模型（所有车道都未就绪或候选为空）",
+			Message: msg,
 		}
 	}
 	// 报最后一个错误（它最接近真相）。
@@ -705,6 +965,11 @@ func (r *Router) Complete(ctx context.Context, turn *Turn, emit func(Chunk), com
 	}
 	if last.RetryAfterSec > 0 {
 		final.RetryAfterSec = last.RetryAfterSec
+	}
+	// ⚠️ **关闭换模型时，错误必须说明"没有下文"** ——
+	//   否则用户看到"出口被风控"，会以为网关会自动换个模型再试。
+	if !r.allowModelSwitch {
+		final.Message += "（未开启「自动跨模型调用」，不会切换到其他模型）"
 	}
 	return result, final
 }
@@ -769,25 +1034,98 @@ func skipLane(cands []candidate, from int, laneID string) {
 	}
 }
 
-// resolveOriginLane 判定**请求原本要的车道**。
+// resolveTarget 解析**请求指向的（车道, 裸模型名）**。
 //
 // ⚠️ 优先级：
 //
-//	① 客户端显式指定的车道（`turn.Lane`）
-//	② 请求的模型里带的车道前缀（`zen/xxx`）
-//	③ 候选链里的**第一个**（它已经被排成"请求的模型优先"）
-//	④ 免密车道（兜底）
-func resolveOriginLane(explicitLane, requestedModel string, cands []candidate) string {
-	if explicitLane != "" {
-		return explicitLane
+//	① 模型 id 里带的车道前缀，**且该前缀确实是已知车道**（`kilo/...`）
+//	② 客户端显式指定的车道（`turn.Lane`）
+//	③ 目录里**第一条**含该裸名的车道（`ResolveLaneForModel`，顺序稳定）
+//	④ **没有兜底** —— 解析不出来就返回空车道，由上层报错
+//
+// ⚠️ 返回值 `strict` = 前缀/显式指定**命中了一条真实车道** ——
+//
+//	此时**只能在这条车道的候选里挑**；同名模型绝不能抢走它。
+//
+// ⚠️ 前缀的归一化：去首尾空白 + 忽略大小写 ——
+//
+//	`KILO/x` 与 `kilo /x` 都指向 kilo 车道（用户手输模型名时很常见）。
+//
+// ⚠️ 这个结果同时用于：
+//
+//	· 把请求的候选提到候选链最前（`BuildCandidates`）
+//	· 判定"原车道"（`Complete` 的换车道许可）
+//
+// 两处**必须**来自同一个解析，否则"候选排到了 A，许可却认为原车道是 B"。
+func (r *Router) resolveTarget(explicitLane, requestedModel string) (laneID, upstream string, strict bool) {
+	requestedModel = strings.TrimSpace(requestedModel)
+	prefix, rest := ParseModelID(requestedModel)
+	upstream = strings.TrimSpace(rest)
+
+	// ① 前缀命中**已知车道** → 硬锁定。
+	if prefix != "" {
+		if canon, ok := r.canonicalLane(prefix); ok {
+			return canon, upstream, true
+		}
+		// ⚠️ 前缀不对应任何已知车道（`foo/bar` 是上游自己的命名空间）→
+		//   整串当成裸模型，交给目录匹配，**不能**把它当车道。
+		upstream = requestedModel
 	}
-	if laneID, _ := ParseModelID(requestedModel); laneID != "" {
-		return laneID
+
+	// ② 客户端显式指定的车道。
+	if explicit := strings.TrimSpace(explicitLane); explicit != "" {
+		if canon, ok := r.canonicalLane(explicit); ok {
+			return canon, upstream, true
+		}
 	}
-	if len(cands) > 0 {
-		return cands[0].Lane
+
+	// ③ 目录匹配（顺序稳定）。
+	if r.catalog != nil {
+		if id := ResolveLaneForModel(r.catalog.Models(), upstream); id != "" {
+			return id, upstream, false
+		}
 	}
-	return ZenLaneID
+
+	// ④ ⚠️ **不再兜底 Zen** —— 解析不出来就明确失败，
+	//   否则任何拼错/无前缀的模型都会被静默送到 Zen。
+	return "", upstream, false
+}
+
+// canonicalLane 把用户写的车道前缀归一化成真实的车道 id。
+//
+// ⚠️ 比较去首尾空白 + 忽略大小写；车道 id 本身是小写常量。
+func (r *Router) canonicalLane(raw string) (string, bool) {
+	p := strings.ToLower(strings.TrimSpace(raw))
+	if p == "" {
+		return "", false
+	}
+	if r.lanes != nil {
+		if _, ok := r.lanes.Get(p); ok {
+			return p, true
+		}
+		return "", false
+	}
+	switch p {
+	case ZenLaneID, KiloLaneID, OpenRouterLaneID, CustomLaneID:
+		return p, true
+	}
+	return "", false
+}
+
+// decodePath 把解析路径写成日志可读的一行。
+//
+// ⚠️ 用户排障时要能直接看到"这条请求到底是怎么被解码的" ——
+//
+//	前缀锁定 / 目录匹配 / 完全没命中，三种路径必须区分。
+func decodePath(strict bool, laneID, upstream string) string {
+	switch {
+	case strict && laneID != "":
+		return "前缀锁定 → " + laneID + "/" + upstream
+	case laneID != "":
+		return "目录匹配 → " + laneID + "/" + upstream
+	default:
+		return "无车道前缀，目录中也未命中"
+	}
 }
 
 // EffortLevels 是统一的档位阶梯。

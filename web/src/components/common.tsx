@@ -57,6 +57,13 @@ function laneStyle(lane: LaneID): { badge: string; dot: string; label: string; t
         label: 'Kilo',
         title: 'Kilo 免 key 池：不需要任何凭据，标准 OpenAI 兼容',
       }
+    case 'custom':
+      return {
+        badge: 'border-[var(--warn-line)] bg-[var(--warn-soft)] text-[var(--warn)]',
+        dot: 'bg-[var(--warn)]',
+        label: '自定义',
+        title: '自定义 Key 池：你添加的 OpenAI 兼容端点，只进模型池、只支持手动探测',
+      }
     case 'openrouter':
       return {
         badge:
@@ -214,7 +221,6 @@ export function StateBadge({
   )
 }
 
-// CopyField
 /**
  * 带复制（可选打码）的字段。
  *

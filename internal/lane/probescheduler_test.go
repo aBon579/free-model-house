@@ -121,49 +121,68 @@ func TestProbeSchedulerOnlyProbesFreeModels(t *testing.T) {
 	}
 }
 
-// TestProbeSchedulerSkipsFreshProbes 验证**新鲜的结论不重复探**。
+// TestFullProbeIgnoresFreshProbes 验证**关闭自适应时新鲜的结论也照样探**。
 //
-// ⚠️ 重复探 = 重复花钱。
+// ⚠️ 这是"一会多一会少"的根因之一：
 //
-// ⚠️ 但注意：现在一轮是**全量**的，所以"新鲜"不再导致跳过 ——
+//	探测间隔（10 分钟）≈ ProbeTTL（10 分钟）。
+//	上一轮里**探得晚**的模型，到下一轮开始时还不到 10 分钟 ——
+//	被"结论新鲜"这条规则跳过；探得早的又被重探。
+//	于是每轮探多少个，取决于上一轮跑多久、哪些探得早 ——
+//	用户看到的就是"数量不可预期"。
 //
-//	15 分钟的间隔 > 10 分钟的 TTL，每轮开始时结论都已经过期了。
-//	这条规则只在**手动连点两次**时生效。
-func TestProbeSchedulerSkipsFreshProbes(t *testing.T) {
+//	关闭自适应 = 全量快照，**不许**再按 TTL 跳过。
+func TestFullProbeIgnoresFreshProbes(t *testing.T) {
 	s, _, catalog := newProbeSetup(t, 10, "a", "b")
 	catalog.SetProbe(ProbeResult{
 		Model: "a", State: StateAvailable, At: time.Now().UnixMilli(),
 	})
-	targets := s.PickTargets()
-	for _, tgt := range targets {
-		if tgt.Model == "a" {
-			t.Fatal("新鲜的结论不该被重探")
+	if targets := s.PickTargets(); len(targets) != 2 {
+		t.Fatalf("关闭自适应时该全量探 2 个，实际 %d: %+v", len(targets), targets)
+	}
+}
+
+// TestProbeSchedulerRotates 验证**分批轮转是确定、可收敛的**。
+//
+// ⚠️ 只有在**开启自适应**时才分批；规则：
+//
+//	上次被选中最久远的优先，同代次按模型 id；
+//	每轮取前 N 个并记账 → 相邻轮次不重复，覆盖一圈后回到开头。
+//
+// ⚠️ 覆盖全部 5 个模型后**必须重新从 a、b 开始** ——
+//
+//	这就是"可收敛"：不会出现某轮多某轮少。
+func TestProbeSchedulerRotates(t *testing.T) {
+	s, _, _ := newProbeSetup(t, 2, "a", "b", "c", "d", "e")
+	s.SetAdaptiveBatch(true)
+
+	want := [][]string{
+		{"a", "b"},
+		{"c", "d"},
+		{"e", "a"}, // 一圈探完 → 回到最久没选的 a
+		{"b", "c"},
+	}
+	for i, w := range want {
+		got := modelSet(s.PickTargets())
+		if len(got) != len(w) {
+			t.Fatalf("第 %d 轮该探 %d 个，实际 %d: %v", i+1, len(w), len(got), got)
+		}
+		for _, id := range w {
+			if !got[id] {
+				t.Fatalf("第 %d 轮该包含 %q，实际 %v", i+1, id, got)
+			}
 		}
 	}
 }
 
-// TestProbeSchedulerRotates 验证**轮转** —— 不会一直探同一批。
-//
-// ⚠️ 不轮转的话，排序靠前的模型永远被探，
-//
-//	后面的模型永远探不到 —— 它们的可用性就永远是"未知"。
-//
-// ⚠️ 现在一轮是**全量**的，轮转只在**限流收缩**时才有意义。
-func TestProbeSchedulerRotates(t *testing.T) {
-	s, _, _ := newProbeSetup(t, 2, "a", "b", "c", "d", "e")
-
-	seen := map[string]bool{}
-	for round := 0; round < 5; round++ {
-		targets := s.PickTargets()
-		if len(targets) == 0 {
-			t.Fatalf("第 %d 轮该有目标", round)
+// TestAdaptiveBatchKeepsSizeStable 验证**开启自适应时每轮数量恒定**。
+func TestAdaptiveBatchKeepsSizeStable(t *testing.T) {
+	s, _, _ := newProbeSetup(t, 3, "a", "b", "c", "d", "e", "f", "g", "h")
+	s.SetAdaptiveBatch(true)
+	for i := 0; i < 6; i++ {
+		if n := len(s.PickTargets()); n != 3 {
+			t.Fatalf("第 %d 轮该固定 3 个，实际 %d", i+1, n)
 		}
-		for _, tgt := range targets {
-			seen[tgt.Model] = true
-		}
-	}
-	if len(seen) < 5 {
-		t.Fatalf("轮转没覆盖全部模型，只覆盖了 %d 个: %v", len(seen), seen)
 	}
 }
 
@@ -178,61 +197,29 @@ func TestProbeSchedulerCoversAllModels(t *testing.T) {
 	}
 }
 
-// TestProbeSchedulerBacksOffOnFailure 验证**连续失败的模型退避**。
+// TestFullProbeIgnoresFailureBackoff 验证**关闭自适应时失败模型也每轮都探**。
 //
-// ⚠️ 一个一直报错的模型，每轮都探它就是纯浪费。
+// ⚠️ 之前"连续失败就少探/不探"会让每轮数量随失败情况漂移 ——
 //
-// ⚠️ 退避是**线性**的（不是指数）——
-//
-//	连续失败 N 次就要等 N 轮再探。
-//	所以 "bad" 的探测轮次是 1、2、4、7…（越来越稀），
-//	而 "good" 每轮都探。
-//
-// ⚠️ 限流的模型**每轮会被探两次**（一次 + 一次复核），
-//
-//	所以这里按"轮次"统计，不按"次数"统计。
-func TestProbeSchedulerBacksOffOnFailure(t *testing.T) {
-	s, l, catalog := newProbeSetup(t, 10, "good", "bad")
-	l.fail["bad"] = true
-	// ⚠️ **关掉自适应批量** —— 否则"限流时探得少"会跟退避混在一起，
-	//   两个变量互相干扰，测不出谁在起作用。
+//	用户看到的是"一会多一会少"。关闭自适应 = 全量快照，
+//	失败的模型**恰恰**是最需要下一轮确认有没有恢复的。
+func TestFullProbeIgnoresFailureBackoff(t *testing.T) {
+	s, l, _ := newProbeSetup(t, 10, "good", "bad")
+	// ⚠️ 用"不可用"而不是"限流" —— 避免触发限流复核的 3 秒等待。
+	l.state["bad"] = StateUnavailable
+
 	s.SetAdaptiveBatch(false)
-
-	badRounds := 0
-	goodRounds := 0
-	rounds := 8
+	rounds := 4
 	for i := 0; i < rounds; i++ {
-		// ⚠️ **把上一轮的结论"老化"** ——
-		//
-		//	生产环境里两轮之间隔 15 分钟 > TTL(10 分钟)，
-		//	所以每轮开始时结论都已过期，会被重新探。
-		//	测试里连着跑，结论还是"新鲜"的，会被跳过 ——
-		//	所以这里手动把时间戳往前推，模拟"过了一轮"。
-		old := time.Now().Add(-2 * ProbeTTL).UnixMilli()
-		for _, m := range catalog.Models() {
-			catalog.SetProbe(ProbeResult{
-				Model: m.ID, State: StateAvailable, At: old,
-			})
-		}
-
 		before := len(l.probedModels())
 		s.RunOnce(context.Background())
-		seen := map[string]bool{}
-		for _, m := range l.probedModels()[before:] {
-			seen[m] = true
+		seen := nameSet(l.probedModels()[before:])
+		if len(seen) != 2 {
+			t.Fatalf("第 %d 轮该全量探 2 个，实际 %d: %v", i+1, len(seen), seen)
 		}
-		if seen["bad"] {
-			badRounds++
+		if !seen["good"] || !seen["bad"] {
+			t.Fatalf("第 %d 轮该同时探 good 和 bad，实际 %v", i+1, seen)
 		}
-		if seen["good"] {
-			goodRounds++
-		}
-	}
-	if goodRounds != rounds {
-		t.Fatalf("good 每轮都该被探，实际 %d/%d", goodRounds, rounds)
-	}
-	if badRounds >= goodRounds {
-		t.Fatalf("失败模型该探得更稀：bad=%d good=%d", badRounds, goodRounds)
 	}
 }
 
@@ -383,6 +370,7 @@ func TestAdaptiveBatchShrinksWhenThrottled(t *testing.T) {
 	s := NewProbeScheduler(catalog, registry, ProbeOptions{
 		BatchSize: 8, Concurrency: 2, Interval: time.Minute,
 	})
+	s.SetAdaptiveBatch(true)
 
 	// 全部限流。
 	for i := 0; i < 20; i++ {
@@ -399,23 +387,23 @@ func TestAdaptiveBatchShrinksWhenThrottled(t *testing.T) {
 	}
 
 	s.mu.Lock()
-	// ⚠️ 基数是**候选池的大小**（20 个模型），不是固定的 batchSize。
+	// ⚠️ 基数是**批量上限**（8 个），不是候选池的大小。
 	batch := s.currentBatchLocked(20)
 	s.mu.Unlock()
-	if batch != 5 {
-		t.Fatalf("批量该降到 20/4=5，实际 %d", batch)
+	if batch != 2 {
+		t.Fatalf("批量该降到 8/4=2，实际 %d", batch)
 	}
 
-	// ⚠️ **下一轮该只探 5 个**（不是 20 个）。
+	// ⚠️ **下一轮该只探 2 个**（不是 20 个）。
 	//
-	// ⚠️ 注意：失败退避也在起作用 —— 上一轮全失败，
-	//   所以每个模型的 failures=1，要等一轮才再探。
-	//   这正是"连续失败的少探"。
-	before := len(l.probedModels())
+	// ⚠️ 用轮次小结里的 Probed 而不是 Probe 调用次数 ——
+	//   限流结论会被**复核**，同一个模型会被再问一次，
+	//   调用次数是 4，但"这一轮探了几个模型"仍然是 2。
+	probed := 0
+	s.SetRoundHook(func(sum ProbeRoundSummary) { probed = sum.Probed })
 	s.RunOnce(context.Background())
-	secondRound := len(l.probedModels()) - before
-	if secondRound > 5 {
-		t.Fatalf("限流时该只探 5 个，实际 %d", secondRound)
+	if probed != 2 {
+		t.Fatalf("限流时该只探 2 个模型，实际 %d", probed)
 	}
 }
 
@@ -436,6 +424,7 @@ func TestAdaptiveBatchGrowsWhenHealthy(t *testing.T) {
 	s := NewProbeScheduler(catalog, registry, ProbeOptions{
 		BatchSize: 8, Concurrency: 2, Interval: time.Minute,
 	})
+	s.SetAdaptiveBatch(true)
 	// 全部正常。
 	s.RunOnce(context.Background())
 
@@ -446,8 +435,8 @@ func TestAdaptiveBatchGrowsWhenHealthy(t *testing.T) {
 	if ratio != 0 {
 		t.Fatalf("限流比例该是 0，实际 %v", ratio)
 	}
-	if batch != 20 {
-		t.Fatalf("批量该是满的 20，实际 %d", batch)
+	if batch != 8 {
+		t.Fatalf("批量该是上限 8，实际 %d", batch)
 	}
 }
 
@@ -467,6 +456,7 @@ func TestAdaptiveBatchCanBeDisabled(t *testing.T) {
 // TestAdaptiveBatchNeverZero 验证**批量不会降到 0**。
 func TestAdaptiveBatchNeverZero(t *testing.T) {
 	s, _, _ := newProbeSetup(t, 4, "a", "b", "c", "d")
+	s.SetAdaptiveBatch(true)
 	s.mu.Lock()
 	s.lastThrottleRatio = 1.0
 	batch := s.currentBatchLocked(4)
@@ -486,6 +476,8 @@ func TestSetIntervalAndBatchSize(t *testing.T) {
 	if s.Interval() != 3*time.Minute {
 		t.Fatalf("间隔没生效: %v", s.Interval())
 	}
+	// ⚠️ 批量只在**开启自适应**时生效。
+	s.SetAdaptiveBatch(true)
 	s.SetBatchSize(5)
 	if len(s.PickTargets()) != 5 {
 		t.Fatalf("批量没生效: %d", len(s.PickTargets()))
@@ -500,4 +492,94 @@ func TestSetIntervalAndBatchSize(t *testing.T) {
 	if len(s.PickTargets()) != 5 {
 		t.Fatal("非法批量不该改状态")
 	}
+}
+
+// TestFullProbeCoversAllEveryRound 验证**关闭自适应时每轮覆盖数恒定**。
+//
+// ⚠️ 这是用户反馈的直接回归测试：
+//
+//	"关闭自适应后，自动探测的模型数量一会多一会少"。
+//	现在每轮的探测数必须**恒等于**参与自动探测的模型数（这里 9 个）。
+func TestFullProbeCoversAllEveryRound(t *testing.T) {
+	const models = 9
+	ids := make([]string, 0, models)
+	for i := 0; i < models; i++ {
+		ids = append(ids, fmt.Sprintf("m%d", i))
+	}
+	s, l, _ := newProbeSetup(t, models, ids...)
+
+	var mu sync.Mutex
+	counts := make([]int, 0, 3)
+	s.SetRoundHook(func(sum ProbeRoundSummary) {
+		mu.Lock()
+		counts = append(counts, sum.Probed)
+		mu.Unlock()
+	})
+
+	for round := 1; round <= 3; round++ {
+		s.RunOnce(context.Background())
+		mu.Lock()
+		got := counts[len(counts)-1]
+		mu.Unlock()
+		if got != models {
+			t.Fatalf("第 %d 轮该探 %d 个，实际 %d", round, models, got)
+		}
+	}
+	if n := len(l.probedModels()); n != models*3 {
+		t.Fatalf("3 轮该探 %d 次，实际 %d", models*3, n)
+	}
+}
+
+// probeOffLane 是一条**不参与自动探测**的假车道（模拟自定义 / OR）。
+type probeOffLane struct{ probeLane }
+
+func (p *probeOffLane) AutoProbeable() bool { return false }
+
+// TestFullProbeExcludesNonAutoProbeable 验证**不参与自动探测的车道被排除**。
+//
+// ⚠️ 全量 ≠ 什么都探 —— 只覆盖"参与自动探测"的模型：
+//
+//	用用户自己 Key 的车道（OR / 自定义）照旧排除，否则会把用户额度打满。
+func TestFullProbeExcludesNonAutoProbeable(t *testing.T) {
+	on := &probeLane{id: "zen", fail: map[string]bool{}, state: map[string]ProbeState{}}
+	off := &probeOffLane{probeLane{id: "or", fail: map[string]bool{}, state: map[string]ProbeState{}}}
+	registry := NewRegistry()
+	registry.Register(on)
+	registry.Register(off)
+
+	catalog := NewCatalog()
+	catalog.Replace([]ModelInfo{
+		{ID: "zen/a", Lane: "zen", Enabled: true, Free: true},
+		{ID: "zen/b", Lane: "zen", Enabled: true, Free: true},
+		{ID: "or/c", Lane: "or", Enabled: true, Free: true},
+	})
+	s := NewProbeScheduler(catalog, registry, ProbeOptions{
+		BatchSize: 4, Concurrency: 2, Interval: time.Minute,
+	})
+
+	got := modelSet(s.PickTargets())
+	if len(got) != 2 || !got["zen/a"] || !got["zen/b"] {
+		t.Fatalf("该只探 2 个参与自动探测的模型，实际 %v", got)
+	}
+	if got["or/c"] {
+		t.Fatal("不参与自动探测的车道不该被探")
+	}
+}
+
+// modelSet 把探测目标转成模型名集合。
+func modelSet(targets []probeTarget) map[string]bool {
+	out := make(map[string]bool, len(targets))
+	for _, tgt := range targets {
+		out[tgt.Model] = true
+	}
+	return out
+}
+
+// nameSet 把模型名列表转成集合。
+func nameSet(names []string) map[string]bool {
+	out := make(map[string]bool, len(names))
+	for _, n := range names {
+		out[n] = true
+	}
+	return out
 }

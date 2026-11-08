@@ -1,7 +1,9 @@
 ﻿import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type {
   ApiKey,
+  CustomKey,
   KeysResponse,
+  LogsResponse,
   ModelInfo,
   ProbeResult,
   ProxyStatus,
@@ -81,7 +83,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (!res.ok) {
     // ⚠️ 后端的错误形状有两种（OpenAI 风格 / 简单风格），都兼容。
-    let message = `请求失败（${res.status}）`
+    // ⚠️ `hint` **必须**拼进来 —— 拉取模型失败时它才是"下一步怎么办"，
+    //   只显示 error 用户没法判断是地址、Key 还是代理的问题。
+    let message = ''
     if (body && typeof body === 'object') {
       const b = body as Record<string, unknown>
       if (typeof b.error === 'string') {
@@ -89,11 +93,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       } else if (b.error && typeof b.error === 'object') {
         const e = b.error as Record<string, unknown>
         if (typeof e.message === 'string') message = e.message
-      } else if (typeof b.hint === 'string' && typeof b.error === 'string') {
-        message = `${b.error} —— ${b.hint}`
+      }
+      if (typeof b.hint === 'string' && b.hint) {
+        message = message ? `${message} —— ${b.hint}` : b.hint
       }
     }
-    throw new ApiError(message, res.status)
+    // 带上状态码 —— 用户据此区分 400（填错）/ 401（Key 错）/ 502（上游不通）。
+    throw new ApiError(`HTTP ${res.status}${message ? `：${message}` : ''}`, res.status)
   }
 
   return body as T
@@ -490,6 +496,127 @@ export function useSaveSettings() {
     mutationFn: (body: Partial<Settings>) => post<{ ok: boolean }>('/api/settings', body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['settings'] })
+      qc.invalidateQueries({ queryKey: ['status'] })
+    },
+  })
+}
+
+/**
+ * 日志。
+ *
+ * ⚠️ 关闭的类目后端**直接不返回内容** ——
+ * 前端不需要再过滤一遍；历史数据仍在库里。
+ */
+export function useLogs(category?: string, limit = 300) {
+  const q = new URLSearchParams()
+  q.set('limit', String(limit))
+  if (category) q.set('category', category)
+  return useQuery({
+    queryKey: ['logs', category ?? 'all', limit],
+    queryFn: () => get<LogsResponse>(`/api/logs?${q.toString()}`),
+    refetchInterval: 10_000,
+  })
+}
+
+/** 开/关日志类目。 */
+export function useLogConfig() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: { category: string; enabled: boolean }) =>
+      post<{ ok: boolean }>('/api/logs/config', body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['logs'] }),
+  })
+}
+
+/** 一次性全开/全关日志类目。 */
+export function useLogAll() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (enabledAll: boolean) =>
+      post<{ ok: boolean }>('/api/logs/config', { enabledAll }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['logs'] }),
+  })
+}
+
+/** 清空日志（可只清一个类目）。 */
+export function useClearLogs() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (category?: string) =>
+      post<{ ok: boolean }>('/api/logs/clear', { category: category ?? '' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['logs'] }),
+  })
+}
+
+/** 自定义 OpenAI 兼容 Key 列表。 */
+export function useCustomKeys() {
+  return useQuery({
+    queryKey: ['custom-keys'],
+    queryFn: () => get<{ keys: CustomKey[] }>('/api/custom-keys'),
+  })
+}
+
+/** 拉取自定义端点的模型清单（只读，不落库）。 */
+export function useDiscoverCustomModels() {
+  return useMutation({
+    mutationFn: (body: { baseURL: string; apiKey: string; id?: string }) =>
+      post<{
+        models: string[]
+        count: number
+        contexts?: Record<string, number>
+        maxContext?: number
+        hint?: string
+      }>('/api/custom-keys/discover', body),
+  })
+}
+
+/** 添加自定义 Key。 */
+export function useCreateCustomKey() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: {
+      name: string
+      baseURL: string
+      apiKey: string
+      models: string[]
+      contextLength?: number
+    }) => post<{ ok: boolean; id: string; models: string[] }>('/api/custom-keys/create', body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['custom-keys'] })
+      qc.invalidateQueries({ queryKey: ['models'] })
+      qc.invalidateQueries({ queryKey: ['status'] })
+    },
+  })
+}
+
+/** 编辑自定义 Key（名称 / Base URL / Key / 模型 / 上下文长度）。 */
+export function useUpdateCustomKey() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: {
+      id: string
+      name: string
+      baseURL: string
+      apiKey: string
+      models: string[]
+      contextLength?: number
+    }) => post<{ ok: boolean; id: string; models: string[] }>('/api/custom-keys/update', body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['custom-keys'] })
+      qc.invalidateQueries({ queryKey: ['models'] })
+      qc.invalidateQueries({ queryKey: ['status'] })
+    },
+  })
+}
+
+/** 删除自定义 Key。 */
+export function useDeleteCustomKey() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => post<{ ok: boolean }>('/api/custom-keys/delete', { id }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['custom-keys'] })
+      qc.invalidateQueries({ queryKey: ['models'] })
       qc.invalidateQueries({ queryKey: ['status'] })
     },
   })

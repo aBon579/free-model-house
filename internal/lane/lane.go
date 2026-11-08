@@ -44,7 +44,7 @@ type Lane interface {
 //
 // ⚠️ **为什么要区分** ——
 //
-// 自动探测每 15 分钟跑一轮，**每个模型一次真实推理**。
+// 自动探测每 10 分钟跑一轮，**每个模型一次真实推理**。
 // 对**匿名共享池**（免密车道、Kilo）来说这不花任何人的钱。
 // 但对**用用户自己 Key 的车道**（OpenRouter）来说 ——
 //
@@ -470,6 +470,30 @@ func (c *Catalog) Merge(models []ModelInfo) {
 		c.byLane[m.Lane] = append(c.byLane[m.Lane], m)
 	}
 	// ⚠️ 新进来的模型也要套用探测结论（可能之前探过）。
+	c.applyProbesLocked()
+}
+
+// RemoveLane 把某条车道的模型从清单里摘掉（只删模型行，不动探测结论）。
+//
+// ⚠️ 给**自定义 Key 车道**用 —— 用户删掉一个端点后，
+//
+//	它的模型必须立刻从模型池里消失；否则路由还能选到一个
+//	已经没有凭据的模型，请求会一直失败。
+func (c *Catalog) RemoveLane(laneID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	kept := c.models[:0]
+	for _, m := range c.models {
+		if m.Lane != laneID {
+			kept = append(kept, m)
+		}
+	}
+	c.models = kept
+	// ⚠️ 重建按车道索引。
+	c.byLane = map[string][]ModelInfo{}
+	for _, m := range c.models {
+		c.byLane[m.Lane] = append(c.byLane[m.Lane], m)
+	}
 	c.applyProbesLocked()
 }
 

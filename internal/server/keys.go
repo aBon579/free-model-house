@@ -283,15 +283,50 @@ func (k *Keys) List() []ApiKey {
 	return out
 }
 
+// labelTakenLocked 判断标签是否已被其他 Key 占用。
+//
+// ⚠️ 空标签不参与唯一性（也允许存在多个空标签）——
+// 没起名就谈不上重名，硬拦会让"先建后改"的流程寸步难行。
+//
+// ⚠️ 比较是**去空白 + 不区分大小写**的 —— `Phone` 和 `phone`
+// 在用量页看起来就是同一个名字，视作重名才不会误导人；
+// 展示时仍保留用户输入的原始大小写。
+func (k *Keys) labelTakenLocked(label, exceptID string) bool {
+	norm := strings.ToLower(strings.TrimSpace(label))
+	if norm == "" {
+		return false
+	}
+	for _, k1 := range k.keys {
+		if k1.ID == exceptID {
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(k1.Label)) == norm {
+			return true
+		}
+	}
+	return false
+}
+
 // Create 铸一把新 Key。
 //
 // ⚠️ label ≤ 6 字符（按字符数）—— 超长直接报错，
 //
 //	不悄悄截断（截断后的名字可能认不出是谁）。
+//
+// ⚠️ label 不能和已有 Key 重名 —— 标签是区分 Key 的唯一线索。
 func (k *Keys) Create(label, tier string) (ApiKey, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+
 	label = strings.TrimSpace(label)
+	if label == "" {
+		return ApiKey{}, errLabelRequired()
+	}
 	if n := len([]rune(label)); n > MaxKeyLabelChars {
 		return ApiKey{}, errLabelTooLong(n)
+	}
+	if k.labelTakenLocked(label, "") {
+		return ApiKey{}, errLabelDuplicate(label)
 	}
 	t := ParseKeyTier(tier)
 	key := store.GenerateKey(KeyPrefix)
@@ -307,10 +342,8 @@ func (k *Keys) Create(label, tier string) (ApiKey, error) {
 		ID: row.ID, Key: key, Label: label, Tier: string(t),
 		Enabled: true, CreatedAt: row.CreatedAt,
 	}
-	k.mu.Lock()
 	k.keys[key] = out
 	k.rebuildLimiterLocked(out)
-	k.mu.Unlock()
 	return out, nil
 }
 
@@ -324,6 +357,8 @@ func (k *Keys) Create(label, tier string) (ApiKey, error) {
 //
 //	此时档位被网关盖住，改了也不生效，用户会以为界面坏了；
 //	明确报错反而让他知道该先去关网关级限制。
+//
+// ⚠️ 改标签同样要唯一 —— 否则一次"重命名"就能绕开创建时的校验。
 func (k *Keys) Update(id, label, tier string, enabled *bool) (ApiKey, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -341,8 +376,15 @@ func (k *Keys) Update(id, label, tier string, enabled *bool) (ApiKey, error) {
 
 	if label != "" {
 		label = strings.TrimSpace(label)
+		// ⚠️ `"   "` 也不能当成"没改" —— 它是一次**改成空标签**的请求。
+		if label == "" {
+			return ApiKey{}, errLabelRequired()
+		}
 		if n := len([]rune(label)); n > MaxKeyLabelChars {
 			return ApiKey{}, errLabelTooLong(n)
+		}
+		if k.labelTakenLocked(label, id) {
+			return ApiKey{}, errLabelDuplicate(label)
 		}
 		target.Label = label
 	}
@@ -472,6 +514,31 @@ func (k *Keys) RotateLanKey() string {
 	return out.Key
 }
 
+// Match 返回**命中的那把启用 Key**（鉴权、限流、用量都靠它）。
+//
+// ⚠️ 匹配是**按 Key 本体精确比较**，不是按标签、也不是按前缀 ——
+// 两把 Key 标签相同/为空、或前缀相近，都不会互相命中。
+//
+// ⚠️ 返回整条记录（而不是只返回标签）——
+//
+//	用量需要 KeyID 来分组：标签不是唯一标识。
+func (k *Keys) Match(presented string) (ApiKey, bool) {
+	if presented == "" {
+		return ApiKey{}, false
+	}
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	for key, info := range k.keys {
+		if subtle.ConstantTimeCompare([]byte(key), []byte(presented)) == 1 {
+			if !info.Enabled {
+				return ApiKey{}, false
+			}
+			return info, true
+		}
+	}
+	return ApiKey{}, false
+}
+
 // MatchAny 校验一个 Key 是不是**启用的调用 Key**。
 //
 // ⚠️ 推理面用这个 —— 单端口下，LAN 里的 agent 拿的就是自己的那把，
@@ -484,17 +551,21 @@ func (k *Keys) RotateLanKey() string {
 //
 // ⚠️ **管理面不用这个** —— 管理面用**密码**。
 func (k *Keys) MatchAny(presented string) bool {
-	if presented == "" {
-		return false
+	_, ok := k.Match(presented)
+	return ok
+}
+
+// LabelOf 返回命中的**启用**调用 Key 的标签。
+//
+// ⚠️ 与 MatchAny 的判定**必须一致** —— 鉴权用 MatchAny，
+//
+//	记录标签用 LabelOf；两边判定不一致会出现"放行了但记不到标签"。
+func (k *Keys) LabelOf(presented string) (string, bool) {
+	info, ok := k.Match(presented)
+	if !ok {
+		return "", false
 	}
-	k.mu.RLock()
-	defer k.mu.RUnlock()
-	for key, info := range k.keys {
-		if subtle.ConstantTimeCompare([]byte(key), []byte(presented)) == 1 {
-			return info.Enabled
-		}
-	}
-	return false
+	return info.Label, true
 }
 
 // Allow 报告这把 Key 的这次请求能不能过限流。
@@ -550,12 +621,45 @@ func (k *Keys) Release(presented string) {
 // 同时接受 `Authorization: Bearer <key>` 与 `x-api-key: <key>`
 // —— 后者是 Anthropic SDK 的习惯。
 func BearerOf(r *http.Request) string {
+	if creds := CredentialsOf(r); len(creds) > 0 {
+		return creds[0]
+	}
+	return ""
+}
+
+// CredentialsOf 按**优先级**列出请求里携带的全部调用凭据。
+//
+// ⚠️ 顺序是 `X-Api-Key` → `Authorization: Bearer`：
+//
+//	Anthropic 风格客户端把真正的调用 Key 放在 `X-Api-Key`，
+//	`Authorization` 往往只是代理/SDK 顺手加的（甚至是旧的）。
+//	先认 `X-Api-Key` 才能让用量标签跟着"实际用的那把"。
+//
+// ⚠️ 调用方应**逐个尝试**直到命中一把启用 Key ——
+//
+//	两个头里只要有一个是有效的，请求就该放行，
+//	而不是因为"第一个头无效"直接 401。
+func CredentialsOf(r *http.Request) []string {
+	out := make([]string, 0, 2)
+	add := func(v string) {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return
+		}
+		for _, x := range out {
+			if x == v {
+				return
+			}
+		}
+		out = append(out, v)
+	}
+	add(r.Header.Get("X-Api-Key"))
 	if h := r.Header.Get("Authorization"); h != "" {
 		if strings.HasPrefix(strings.ToLower(h), "bearer ") {
-			return strings.TrimSpace(h[7:])
+			add(h[7:])
 		}
 	}
-	return strings.TrimSpace(r.Header.Get("X-Api-Key"))
+	return out
 }
 
 // —— 管理会话 ——

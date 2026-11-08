@@ -56,6 +56,14 @@
 *.db-shm
 .secret-key
 
+# ── 本地配置与临时目录 ──
+#
+# 只提交模板；真实的 .env 可能含 Key，绝不进仓库。
+/.env
+/.env.*
+!/.env.example
+/.tmp/
+
 # ── 开发 ──
 *.log
 .DS_Store

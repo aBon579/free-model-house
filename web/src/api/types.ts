@@ -5,7 +5,7 @@
 // 但这个代价是**显式**的，TypeScript 会在编译时抓到不匹配。
 
 /** 车道 id。 */
-export type LaneID = 'zen' | 'openrouter' | 'kilo'
+export type LaneID = 'zen' | 'openrouter' | 'kilo' | 'custom'
 
 /**
  * 模型状态。
@@ -23,7 +23,7 @@ export type ModelState =
   | 'unavailable'
 
 /** 能力结论的来源 —— 决定这个结论有多可靠。 */
-export type CapabilitySource = 'probe' | 'listing' | 'heuristic' | 'unknown'
+export type CapabilitySource = 'probe' | 'listing' | 'heuristic' | 'user' | 'unknown'
 
 /** 一个模型。 */
 export interface ModelInfo {
@@ -216,6 +216,15 @@ export interface ModelUsage {
   lane: LaneID
   /** 实际服务的模型 —— 可能与 model 不同（故障转移）。 */
   actualModel: string
+  /**
+   * 这次调用用的 **FMH 调用 Key 的标签**（Key Hub 里起的名字）。
+   *
+   * ⚠️ 同一把 Key 调不同模型会出现多行同名标签，这是正常的 ——
+   *   界面不再用指纹区分。老数据没有这一维时显示「未命名」。
+   */
+  keyLabel?: string
+  /** 命中的那把 Key 的稳定 id（仅供后端/调试使用）。 */
+  keyId?: string
   requests: number
   turns: number
   inputTokens: number
@@ -321,8 +330,15 @@ export interface Settings {
   autoModelSwitch: boolean
   probeEnabled: boolean
   probeIntervalMin: number
+  /**
+   * **计划性调用列表** —— 最多 3 个模型 id，按优先级回落。
+   *
+   * ⚠️ 只在 `autoModelSwitch` 开启时生效；
+   *   三个都不可用才回到模型池的原有回落规则。
+   */
+  planModels?: string[]
   // ⚠️ **没有 probeBatchSize** —— 探测是**全量**的，
-  //   每 15 分钟把每个免费模型都探一遍。
+  //   每 10 分钟把每个免费模型都探一遍。
   /** 探测批量自适应 —— 上游越拥挤，探得越少。 */
   adaptiveProbe: boolean
 }
@@ -334,6 +350,48 @@ export interface QuotaInfo {
   remaining: number
   freeTierUsageToday: number
   label?: string
+}
+
+/** 一条运行日志。 */
+export interface LogRow {
+  id: number
+  at: number
+  category: string
+  message: string
+}
+
+/** 日志类目与开关。 */
+export interface LogCategory {
+  id: string
+  label: string
+  enabled: boolean
+}
+
+/** 日志页数据。 */
+export interface LogsResponse {
+  logs: LogRow[]
+  categories: LogCategory[]
+  /** 各类目累计条数（关闭的类目也会有历史条数）。 */
+  counts: Record<string, number>
+}
+
+/**
+ * Key Hub 的自定义 OpenAI 兼容端点。
+ *
+ * ⚠️ 这类 Key 的模型与 OpenRouter 车道行为一致：
+ *   不参与自动批量探测，只支持手动探测；模型只进模型池。
+ */
+export interface CustomKey {
+  id: string
+  name: string
+  baseURL: string
+  models: string[]
+  /** 用户填写的上下文长度（0 = 没填）；会作为 `context_window` 给 agent。 */
+  contextLength?: number
+  /** 加密 Key 的指纹（不是 Key 本身）。 */
+  hint: string
+  ready: boolean
+  manualProbeOnly: boolean
 }
 
 /** 出口代理配置。 */

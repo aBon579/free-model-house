@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/aBon579/free-model-house/internal/lane"
+	"github.com/aBon579/free-model-house/internal/loghub"
 	"github.com/aBon579/free-model-house/internal/store"
 )
 
@@ -54,6 +55,8 @@ type Admin struct {
 	password *Password
 	// logger 记后台任务的日志（可选）。
 	logger *log.Logger
+	// loghub 是分类运行日志（可为 nil）。
+	loghub *loghub.Hub
 }
 
 // SetEgress 装上出口探测器。
@@ -121,6 +124,9 @@ func (a *Admin) persistLaneSwitches() {
 
 // SetLogger 装上日志器。
 func (a *Admin) SetLogger(l *log.Logger) { a.logger = l }
+
+// SetLogHub 装上分类日志中心。
+func (a *Admin) SetLogHub(h *loghub.Hub) { a.loghub = h }
 
 // logf 记一条日志。
 func (a *Admin) logf(format string, args ...any) {
@@ -225,6 +231,22 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		a.handleProxyTest(w, r)
 	case "/settings":
 		a.handleSettings(w, r)
+	case "/logs":
+		a.handleLogs(w, r)
+	case "/logs/config":
+		a.handleLogConfig(w, r)
+	case "/logs/clear":
+		a.handleLogClear(w, r)
+	case "/custom-keys":
+		a.handleCustomKeys(w, r)
+	case "/custom-keys/discover":
+		a.handleCustomKeyDiscover(w, r)
+	case "/custom-keys/create":
+		a.handleCustomKeyCreate(w, r)
+	case "/custom-keys/update":
+		a.handleCustomKeyUpdate(w, r)
+	case "/custom-keys/delete":
+		a.handleCustomKeyDelete(w, r)
 	default:
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "not found"})
 	}
@@ -632,6 +654,10 @@ func (a *Admin) handleKeyCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.logf("新建调用 Key：%s（标签 %q，档位 %s）", store.CredentialHint(k1.Key), k1.Label, k1.Tier)
+	if a.loghub != nil {
+		a.loghub.Log(loghub.CategoryKey, "新建调用 Key：标签 %q，档位 %s，指纹 %s",
+			k1.Label, k1.Tier, store.CredentialHint(k1.Key))
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true,
 		"key": map[string]any{
@@ -758,6 +784,9 @@ func (a *Admin) handleKeyDelete(w http.ResponseWriter, r *http.Request) {
 	if err := a.keys.Delete(body.ID); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
+	}
+	if a.loghub != nil {
+		a.loghub.Log(loghub.CategoryKey, "删除调用 Key：id=%s", body.ID)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -1075,10 +1104,16 @@ func (a *Admin) handleSettings(w http.ResponseWriter, r *http.Request) {
 			"autoModelSwitch":   a.db.GetAutoModelSwitch(false),
 			"crossLaneFallback": a.db.GetAutoModelSwitch(false),
 			"probeEnabled":      a.db.GetBool(store.SettingProbeEnabled, true),
-			"probeIntervalMin":  a.db.GetInt(store.SettingProbeIntervalMin, 15),
+			// ⚠️ 默认 **10 分钟**（原来是 15）。
+			//   只改默认值 —— 用户自己存过的值仍然优先。
+			"probeIntervalMin": a.db.GetInt(store.SettingProbeIntervalMin, 10),
 			// ⚠️ **没有 probeBatchSize** —— 探测是**全量**的。
-			//   每 15 分钟把每个免费模型都探一遍。
-			"adaptiveProbe": a.db.GetBool(store.SettingAdaptiveProbe, true),
+			//   每 10 分钟把每个免费模型都探一遍。
+			// ⚠️ **默认关闭** = 每轮全量探测（数量稳定、结论一致）。
+			"adaptiveProbe": a.db.GetBool(store.SettingAdaptiveProbe, false),
+			// ⚠️ **计划性调用列表** —— 最多 3 个，按优先级。
+			//   只在「自动跨模型调用」开启时生效。
+			"planModels": a.planModels(),
 			// ⚠️ **没有 conformanceIntervalMin** —— 合规检查功能已砍掉。
 		})
 		return
@@ -1100,6 +1135,8 @@ func (a *Admin) handleSettings(w http.ResponseWriter, r *http.Request) {
 		// ⚠️ **没有 ProbeBatchSize** —— 探测是**全量**的。
 		// ⚠️ **没有 ConformanceIntervalMin** —— 合规检查已砍掉。
 		AdaptiveProbe *bool `json:"adaptiveProbe"`
+		// 计划性调用列表（最多 3 个模型 id，按优先级）。
+		PlanModels *[]string `json:"planModels"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求体不是 JSON"})
@@ -1152,11 +1189,40 @@ func (a *Admin) handleSettings(w http.ResponseWriter, r *http.Request) {
 	if body.AdaptiveProbe != nil {
 		a.db.SetSetting(store.SettingAdaptiveProbe, boolToStr(*body.AdaptiveProbe))
 	}
+	if body.PlanModels != nil {
+		// ⚠️ **最多 3 个**，空的槽位允许（表示"这一级不设"）。
+		plan := make([]string, 0, 3)
+		for _, m := range *body.PlanModels {
+			m = strings.TrimSpace(m)
+			if m == "" {
+				continue
+			}
+			if len(plan) >= 3 {
+				break
+			}
+			plan = append(plan, m)
+		}
+		if err := a.db.PutJSON(store.SettingPlanModels, plan); err != nil {
+			a.logf("存计划性调用列表失败: %v", err)
+		}
+	}
 	// ⚠️ **没有 conformanceIntervalMin** —— 合规检查已砍掉。
 	if a.onConfigChanged != nil {
 		a.onConfigChanged()
 	}
+	if a.loghub != nil {
+		a.loghub.Log(loghub.CategorySystem, "设置已更新（探测/回落/计划性调用列表等）")
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// planModels 读计划性调用列表。
+func (a *Admin) planModels() []string {
+	out := []string{}
+	if _, err := a.db.GetJSON(store.SettingPlanModels, &out); err != nil {
+		return []string{}
+	}
+	return out
 }
 
 // boolToStr 把 bool 变成存储用的字符串。

@@ -185,8 +185,17 @@ type UsageRecord struct {
 	// ActualModel 是**实际服务**的模型 —— 故障转移后可能与请求的不同。
 	ActualModel string `json:"actualModel"`
 	Client      string `json:"client"`
-	Requests    int    `json:"requests"`
-	Turns       int    `json:"turns"`
+	// KeyLabel 是这次调用用的 FMH 调用 Key 的标签（Key Hub 里起的名字）。
+	KeyLabel string `json:"keyLabel"`
+	// KeyID 是这次调用命中的**那把 Key 的稳定标识**。
+	//
+	// ⚠️ 用量按它分组，而不是只按标签 —— 两把 Key 标签相同、
+	//   或都没起名字时，只看标签会把它们的用量混成一行。
+	KeyID string `json:"keyId"`
+	// KeyHint 是那把 Key 的指纹（`fmh-…AB12`），标签为空时用来区分。
+	KeyHint  string `json:"keyHint"`
+	Requests int    `json:"requests"`
+	Turns    int    `json:"turns"`
 	// Attempts 是尝试次数（含故障转移）。
 	Attempts int `json:"attempts"`
 	// InputTokens / OutputTokens / ReasoningTokens 是 token 计量。
@@ -217,6 +226,13 @@ type Turn struct {
 	Stream bool
 	// ClientID 是调用方的标识（从 Key 解析出来的）。
 	ClientID string
+	// KeyLabel 是本次调用命中的 FMH 调用 Key 的标签（用量与日志用）。
+	KeyLabel string
+	// KeyID / KeyHint 是那把 Key 的稳定标识与指纹。
+	//
+	// ⚠️ 标签不是唯一标识 —— 同名/无名 Key 要靠 KeyID 分开记账。
+	KeyID   string
+	KeyHint string
 	// Seed 是会话种子 —— 用来绑定稳定的**上游** session。
 	Seed string
 	// EffortPatch 是模型自己声明的思考参数补丁（OpenRouter 那种 reasoning 对象）。

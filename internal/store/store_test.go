@@ -214,7 +214,6 @@ func TestSecretRoundTrip(t *testing.T) {
 	if sealed != "sealed-value" || hint != "sk-or-…abcd" {
 		t.Fatalf("内容不对: %q %q", sealed, hint)
 	}
-	// 删除。
 	db.DeleteSecret("openrouter")
 	_, _, found, _ = db.GetSecret("openrouter")
 	if found {

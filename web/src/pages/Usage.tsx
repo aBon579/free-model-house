@@ -197,6 +197,11 @@ export function Usage() {
                   <tr className="border-b border-[var(--line)] bg-[var(--surface-2)] text-[11.5px] font-semibold text-[var(--ink-3)]">
                     <th scope="col" className="px-4 py-2 text-left">模型</th>
                     <th scope="col" className="px-3 py-2 text-left">车道</th>
+                    {/* ⚠️ **这次调用用的是哪把 FMH Key** ——
+                        只显示 Key Hub 里给这把 Key 起的标签。
+                        ⚠️ 不再显示指纹：同一把 Key 调不同模型本来就会
+                        出现多行同名标签，指纹只会让列变得难读。 */}
+                    <th scope="col" className="px-3 py-2 text-left">调用 Key</th>
                     <th scope="col" className="px-3 py-2 text-right">请求</th>
                     <th scope="col" className="px-3 py-2 text-right">回合</th>
                     <th scope="col" className="px-3 py-2 text-right">输入</th>
@@ -222,7 +227,12 @@ export function Usage() {
                           ) : null}
                         </td>
                         <td className="px-3 py-2">
-                          <LaneBadge lane={m.lane as 'zen' | 'openrouter'} />
+                          <LaneBadge lane={m.lane as 'zen' | 'openrouter' | 'kilo' | 'custom'} />
+                        </td>
+                        <td className="px-3 py-2">
+                          <span className="whitespace-nowrap text-[12px] text-[var(--ink-2)]">
+                            {m.keyLabel || '未命名'}
+                          </span>
                         </td>
                         <td className="tnum px-3 py-2 text-right">{m.requests}</td>
                         <td className="tnum px-3 py-2 text-right">{m.turns}</td>

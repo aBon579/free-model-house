@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { KeyRound, Lock } from 'lucide-react'
 import { PageTitle } from '../components/Shell'
 import {
@@ -10,6 +11,7 @@ import {
   Input,
   Notice,
   PasswordInput,
+  Select,
   Switch,
   cn,
 } from '../components/ui'
@@ -17,6 +19,7 @@ import { useToast } from '../components/toast'
 import type { Settings } from '../api/types'
 import {
   useChangePassword,
+  useModels,
   useSaveSettings,
   useSettings,
 } from '../api/client'
@@ -29,9 +32,93 @@ import {
  *   这里只留**网关自身**的配置：探测、数据、密码。
  */
 
+/**
+ * 计划性调用列表的一个槽位。
+ *
+ * ⚠️ **两个必须** ——
+ *
+ *  ① 下拉框必须 `w-full` + 外层 `min-w-0`：`<select>` 的宽度默认由**最长选项**撑开，
+ *     三个槽位并排时就会互相压住（之前的重叠问题就是这么来的）。
+ *  ② 完整模型名必须在**输入框下方**弹出，且不能被卡片/窗口裁切 ——
+ *     所以用 `position: fixed` + portal 到 body，而不是绝对定位在卡片里。
+ */
+function PlanSlot({
+  index,
+  value,
+  models,
+  onChange,
+}: {
+  index: number
+  value: string
+  models: { id: string }[]
+  onChange: (v: string) => void
+}) {
+  const [tip, setTip] = useState<{ left: number; top: number; width: number; above: boolean } | null>(
+    null,
+  )
+
+  function showTip(el: HTMLElement) {
+    const r = el.getBoundingClientRect()
+    const width = Math.min(Math.max(r.width, 240), Math.min(440, window.innerWidth - 24))
+    const left = Math.max(12, Math.min(r.left, window.innerWidth - width - 12))
+    const below = r.bottom + 8
+    // 下方空间不够就翻到上方 —— 保证浮层永远可见。
+    const above = below + 80 > window.innerHeight
+    setTip({ left, top: above ? r.top - 8 : below, width, above })
+  }
+
+  return (
+    <div
+      className="min-w-0"
+      onMouseEnter={(e) => showTip(e.currentTarget)}
+      onMouseLeave={() => setTip(null)}
+    >
+      <Field
+        label={`第 ${index + 1} 优先级`}
+        hint={index === 0 ? '最先回落到的模型' : '上一级不可用时的下一选择'}
+      >
+        <Select
+          className="w-full min-w-0"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          onFocus={(e) => showTip(e.currentTarget)}
+          onBlur={() => setTip(null)}
+          aria-label={`第 ${index + 1} 优先级模型`}
+          title={value || undefined}
+        >
+          <option value="">不设</option>
+          {models.map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.id}
+            </option>
+          ))}
+        </Select>
+      </Field>
+      {tip && value
+        ? createPortal(
+            <div
+              className="pointer-events-none fixed z-[90] rounded-[var(--r-sm)] border border-[var(--line)] bg-[var(--surface)] px-3 py-2 shadow-[0_8px_24px_rgba(0,0,0,0.18)]"
+              style={{
+                left: tip.left,
+                width: tip.width,
+                top: tip.above ? undefined : tip.top,
+                bottom: tip.above ? window.innerHeight - tip.top : undefined,
+              }}
+            >
+              <div className="mb-1 text-[10.5px] tracking-wide text-[var(--ink-3)]">完整模型名</div>
+              <div className="mono break-all text-[12px] leading-4 text-[var(--ink)]">{value}</div>
+            </div>,
+            document.body,
+          )
+        : null}
+    </div>
+  )
+}
+
 /** 设置页。 */
 export function Settings() {
   const { data: settings } = useSettings()
+  const { data: modelsData } = useModels()
   const save = useSaveSettings()
 
   // ⚠️ 本地草稿 —— 后台轮询**不覆盖**用户正在编辑的东西。
@@ -111,7 +198,48 @@ export function Settings() {
           <ChangePasswordCard />
         </div>
 
-        {/* 探测 */}
+        {/* 计划性调用列表 */}
+        <Card>
+          <CardHeader
+            title="计划性调用列表"
+            description="请求模型失败时，按这三个槽位的优先级依次回落；三个都不可用时，才回到模型池的原有回落规则。"
+          />
+          <CardBody>
+            {!draft.autoModelSwitch ? (
+              <Notice tone="warn">
+                <div className="text-[12px]">
+                  当前「自动跨模型调用」是关闭的 —— 计划性调用列表只在开启回落时生效。
+                </div>
+              </Notice>
+            ) : null}
+            <div className="mt-3 grid gap-x-4 gap-y-2 md:grid-cols-3">
+              {[0, 1, 2].map((i) => {
+                const current = draft.planModels?.[i] ?? ''
+                const enabledModels = (modelsData?.models ?? []).filter((m) => m.enabled)
+                return (
+                  <PlanSlot
+                    key={i}
+                    index={i}
+                    value={current}
+                    models={enabledModels}
+                    onChange={(v) => {
+                      const next = [0, 1, 2].map((j) =>
+                        j === i ? v : (draft.planModels?.[j] ?? ''),
+                      )
+                      // ⚠️ 去掉空槽位再存 —— 后端按顺序回落，空串没意义。
+                      const plan = next.filter((x) => x !== '')
+                      setDraft({ ...draft, planModels: next })
+                      save.mutate({ planModels: plan })
+                    }}
+                  />
+                )
+              })}
+            </div>
+            <div className="mt-2 text-[11.5px] leading-[18px] text-[var(--ink-3)]">
+              只能从模型池里选。槽位按顺序回落；某个槽位的模型被禁用、车道关闭、探测不可用或在冷却时，会自动跳到下一级。下拉框里名称过长会截断，鼠标悬停可在下方看到完整模型名。
+            </div>
+          </CardBody>
+        </Card>
         <Card>
           <CardHeader title="探测" />
           <CardBody className="divide-y divide-[var(--line-soft)]">
@@ -148,7 +276,7 @@ export function Settings() {
             </Field>
 
             {/* ⚠️ **没有"每轮探测几个模型"** ——
-                探测是**全量**的，每 15 分钟把每个免费模型都探一遍。
+                探测是**全量**的，每 10 分钟把每个免费模型都探一遍。
                 批量这个概念已经不存在了 ——
                 留着它会让人以为还在"少量多次"。 */}
 
@@ -157,7 +285,11 @@ export function Settings() {
                 高峰期继续按正常节奏探测就是拿额度去撞限流墙。 */}
             <Field
               label="探测批量自适应"
-              hint="上游限流变多时自动少探几个，恢复后再调回去。省额度，也避免在限流时拿到的全是无效信息。"
+              hint={
+                draft.adaptiveProbe
+                  ? '开启：每轮最多探 8 个，按「上次探测最久远的优先」轮转，覆盖一圈后重新开始。'
+                  : '关闭（默认）：每轮全量探测所有参与自动探测的模型，每轮数量固定、可预期。'
+              }
             >
               <Switch
                 checked={draft.adaptiveProbe}

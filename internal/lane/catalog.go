@@ -23,6 +23,8 @@ const (
 	CapabilitySourceListing CapabilitySource = "listing"
 	// CapabilitySourceHeuristic 是规则/名称启发式猜的。
 	CapabilitySourceHeuristic CapabilitySource = "heuristic"
+	// CapabilitySourceUser 是用户在自定义端点上明确填写的（如上下文长度）。
+	CapabilitySourceUser CapabilitySource = "user"
 	// CapabilitySourceUnknown 是没有结论。
 	CapabilitySourceUnknown CapabilitySource = "unknown"
 )

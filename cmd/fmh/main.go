@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/aBon579/free-model-house/internal/lane"
+	"github.com/aBon579/free-model-house/internal/loghub"
 	"github.com/aBon579/free-model-house/internal/server"
 	"github.com/aBon579/free-model-house/internal/store"
 )
@@ -173,6 +174,12 @@ func run(addr, dataDir string, logger *log.Logger) error {
 	kilo := lane.NewKiloLane()
 	registry.Register(kilo)
 
+	// ⚠️ **自定义 Key 车道** ——
+	//   用户在 Key Hub 添加自己的 OpenAI 兼容端点（Base URL + Key + 模型）。
+	//   ⚠️ 和 OpenRouter 一样：**只手动探测**、**只进模型池**；
+	//   实际调用时客户端仍然用 FMH 的 Key 认证，上游用的是用户自己的 Key。
+	registry.Register(lane.NewCustomLane())
+
 	catalog := lane.NewCatalog()
 	// ⚠️ 限流账本要**和路由共享同一个实例** —— 否则恢复进去的记录路由器根本看不到。
 	book := lane.NewBook()
@@ -216,9 +223,16 @@ func run(addr, dataDir string, logger *log.Logger) error {
 			logger.Printf("记用量失败: %v", err)
 		}
 	})
+	// ⚠️ **分类运行日志** —— 管理台「日志」页读它。
+	logHub := loghub.New(db)
+	gateway.SetLogger(logHub)
 
 	admin := server.NewAdmin(keys, registry, catalog, db, vault)
 	admin.SetLogger(logger)
+	admin.SetLogHub(logHub)
+	// ⚠️ **恢复自定义 Key** —— 必须在后台首次刷清单**之前**装载，
+	//   否则启动后前 30 分钟模型池里没有这些模型。
+	admin.ReloadCustomProviders()
 	admin.SetLaneSwitches(switches)
 	// ⚠️ **代理管理** —— 供管理台读写配置与检测连通。
 	admin.SetProxy(proxy)
@@ -259,6 +273,8 @@ func run(addr, dataDir string, logger *log.Logger) error {
 		//	这个信号比任何错误文案都直接。
 		logger.Printf("探测 %s → %s（%dms）%s",
 			r.Model, r.State, r.LatencyMs, detailSuffix(r.Detail))
+		logHub.Log(loghub.CategoryProbe, "%s → %s（%dms）%s",
+			r.Model, r.State, r.LatencyMs, detailSuffix(r.Detail))
 
 		// ⚠️ 写回模型行由调度器自己做了（`ApplyProbe`）——
 		//   这里只负责**落盘**，重启后不用重新探一遍。
@@ -290,6 +306,7 @@ func run(addr, dataDir string, logger *log.Logger) error {
 			msg += fmt.Sprintf("；最常见失败（%d 个）：%s", s.CommonCount, s.CommonFailure)
 		}
 		logger.Printf("%s", msg)
+		logHub.Log(loghub.CategoryProbe, "%s", msg)
 	})
 
 	// 管理台的"手动探测"按钮用同一个调度器。
@@ -335,8 +352,8 @@ func run(addr, dataDir string, logger *log.Logger) error {
 		prober.SetEnabled(db.GetBool(store.SettingProbeEnabled, true))
 		prober.SetInterval(probeInterval(db))
 		prober.SetBatchSize(probeBatchSize(db))
-		// ⚠️ 自适应批量。
-		prober.SetAdaptiveBatch(db.GetBool(store.SettingAdaptiveProbe, true))
+		// ⚠️ 自适应批量（默认**关闭** = 每轮全量）。
+		prober.SetAdaptiveBatch(db.GetBool(store.SettingAdaptiveProbe, false))
 		// ⚠️ **结论的面板保质期跟着间隔走** —— 间隔改了，
 		//   旧结论的显示寿命也要跟着改。
 		catalog.SetProbeStaleness(probeInterval(db))
@@ -353,6 +370,10 @@ func run(addr, dataDir string, logger *log.Logger) error {
 	prober.SetEnabled(db.GetBool(store.SettingProbeEnabled, true))
 	prober.SetInterval(probeInterval(db))
 	prober.SetBatchSize(probeBatchSize(db))
+	// ⚠️ **启动时也要应用自适应开关** ——
+	//   之前只在"设置变更"钩子里设置，重启后回到调度器的默认值，
+	//   用户明明关掉了自适应，重启后又被悄悄打开（"数量一会多一会少"）。
+	prober.SetAdaptiveBatch(db.GetBool(store.SettingAdaptiveProbe, false))
 	// ⚠️ **结论的面板保质期 = 探测间隔** ——
 	//   间隔过去了，面板上的结论就该回到"未探测"，等下一轮真探了再显示。
 	catalog.SetProbeStaleness(probeInterval(db))
@@ -370,6 +391,7 @@ func run(addr, dataDir string, logger *log.Logger) error {
 		return err
 	}
 	logger.Print(srv.Banner())
+	logHub.Log(loghub.CategorySystem, "服务启动：监听 %s，数据目录 %s，版本 %s", addr, dataDir, server.Version)
 
 	// ⑬ 优雅关闭。
 	errCh := make(chan error, 1)
@@ -389,14 +411,14 @@ func run(addr, dataDir string, logger *log.Logger) error {
 }
 
 // probeInterval 返回探测间隔。
-// ⚠️ 默认 15 分钟 —— 一轮 = 一次**全量快照**（每个模型都探一次）。
+// ⚠️ 默认 **10 分钟** —— 一轮 = 一次**全量快照**（每个模型都探一次）。
 //
-// ⚠️ 间隔必须 **> ProbeTTL(10 分钟)** ——
+// ⚠️ 间隔与 ProbeTTL(10 分钟) **同值**：
 //
-//	否则每轮开始时，所有模型的结论都还是"新鲜的"，
-//	于是**一个都不会被探**（探测形同虚设）。
+//	意义是"到下一轮开始时，上一轮结论刚好过期" —— 每个模型都会被重新探到。
+//	⚠️ 用户自定义的间隔仍然优先，且不做任何截断。
 func probeInterval(db *store.DB) time.Duration {
-	min := db.GetInt(store.SettingProbeIntervalMin, 15)
+	min := db.GetInt(store.SettingProbeIntervalMin, 10)
 	if min < 1 {
 		min = 1
 	}
@@ -405,7 +427,7 @@ func probeInterval(db *store.DB) time.Duration {
 
 // probeBatchSize 返回每轮探测的模型数。
 //
-// ⚠️ **恒等于池子大小** —— 探测是**全量**的，每 15 分钟把
+// ⚠️ **恒等于池子大小** —— 探测是**全量**的，每 10 分钟把
 //
 //	每个免费模型都探一遍。
 //
@@ -417,10 +439,10 @@ func probeInterval(db *store.DB) time.Duration {
 //	   （见 OpenRouterLane.AutoProbeable），
 //	   所以全量探测只花**匿名共享池**的额度 —— 不花用户的钱。
 func probeBatchSize(db *store.DB) int {
-	// ⚠️ 设成上限（100）而不是定值 ——
-	//	池子可能超过 100 个模型（Kilo + 免密加起来将来可能上百）。
-	//	这个数字只是"别无限大"的保险丝。
-	return 100
+	// ⚠️ 这是**开启自适应**时的每轮批量上限；关闭自适应时每轮是全量，
+	//	这个值不参与计算。
+	//	8 个 ≈ 池子（~28 个）在 4 轮内轮完一圈，且不会一次打疼上游。
+	return lane.DefaultAdaptiveBatch
 }
 
 // applyLanTier 把持久化的**网关级档位**应用到 Key 管理器。
@@ -513,8 +535,16 @@ func applySettings(db *store.DB, router *lane.Router, logger *log.Logger) {
 	//   免得升级之后开关自己变回关闭。
 	switchOn := db.GetAutoModelSwitch(false)
 	router.SetAutoModelSwitch(switchOn)
+	// ⚠️ **计划性调用列表** —— 三个模型槽位按优先级回落。
+	var plan []string
+	if _, err := db.GetJSON(store.SettingPlanModels, &plan); err == nil {
+		router.SetPlanModels(plan)
+	}
 	if switchOn {
 		logger.Printf("自动跨模型调用：已开启（模型失败时自动换：Kilo ↔ Zen → OpenRouter）")
+		if len(plan) > 0 {
+			logger.Printf("计划性调用列表：%d 个槽位，按优先级回落", len(plan))
+		}
 	} else {
 		logger.Printf("自动跨模型调用：已关闭（只重试当前模型，不换模型）")
 	}

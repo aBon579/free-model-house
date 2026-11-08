@@ -388,7 +388,7 @@ export function Sources() {
                 `free-models-per-day` 配额**打满了**，剩下的全是
                 "Rate limit exceeded: free-models-per-day"。
 
-                而那是**用户自己的额度**。拿它做「每 15 分钟全量探测」
+                而那是**用户自己的额度**。拿它做「每 10 分钟全量探测」
                 就是在**花用户的钱**。
 
                 所以 OR 车道**不参与自动探测**：

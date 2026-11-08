@@ -89,7 +89,7 @@ export function Models() {
     else toast.bad('探测中断')
   })
   const [query, setQuery] = useState('')
-  const [laneFilter, setLaneFilter] = useState<'all' | 'zen' | 'kilo' | 'openrouter'>('all')
+  const [laneFilter, setLaneFilter] = useState<'all' | 'zen' | 'kilo' | 'openrouter' | 'custom'>('all')
   const [stateFilter, setStateFilter] = useState<ModelState | 'all'>('all')
   const [capFilter, setCapFilter] = useState<(typeof capabilityFilters)[number]['key']>('all')
 
@@ -112,7 +112,7 @@ export function Models() {
   //   前端却又从探测表里捞回 available）。
   //   判据与后端一致：probedAt 距今超过「探测间隔」= 过期。
   const probeMap = useMemo(() => {
-    const intervalMs = (settings?.probeIntervalMin ?? 15) * 60_000
+    const intervalMs = (settings?.probeIntervalMin ?? 10) * 60_000
     const now = Date.now()
     const map = new Map<string, (typeof probes extends undefined ? never : any)>()
     for (const p of probes?.probes ?? []) {
@@ -334,6 +334,7 @@ export function Models() {
             <option value="zen">免密车道</option>
             <option value="kilo">Kilo 免 key 池</option>
             <option value="openrouter">OpenRouter</option>
+            <option value="custom">自定义 Key 池</option>
           </Select>
           <Select
             value={stateFilter}

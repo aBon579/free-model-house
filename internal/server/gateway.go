@@ -10,7 +10,44 @@ import (
 	"time"
 
 	"github.com/aBon579/free-model-house/internal/lane"
+	"github.com/aBon579/free-model-house/internal/loghub"
+	"github.com/aBon579/free-model-house/internal/store"
 )
+
+// keyLabelCtxKey 把**本次调用命中的 FMH 调用 Key 标签**放进请求 context。
+//
+// ⚠️ 为什么不用 Turn 字段 —— `Turn` 是**解析出来的请求体**，
+//
+//	鉴权发生在解析之前，两者生命周期不同。
+//	挂 context 最省事，也不会污染对外的请求结构。
+type keyLabelCtxKey struct{}
+
+// keyInfoCtxKey 携带**命中的那把 Key 的完整标识**（id / 标签 / 指纹）。
+//
+// ⚠️ 只有标签是不够的 —— 两把 Key 可以同名或都不命名，
+//
+//	用量按标签聚合就会混成一行（看起来像是"全都记在主 Key 上"）。
+type keyInfoCtxKey struct{}
+
+// keyInfo 是鉴权阶段命中的那把 Key。
+type keyInfo struct {
+	ID    string
+	Label string
+	Hint  string
+}
+
+func keyInfoOf(r *http.Request) keyInfo {
+	if v, ok := r.Context().Value(keyInfoCtxKey{}).(keyInfo); ok {
+		return v
+	}
+	// 兼容旧写法（只有标签）。
+	if v, ok := r.Context().Value(keyLabelCtxKey{}).(string); ok {
+		return keyInfo{Label: v}
+	}
+	return keyInfo{}
+}
+
+func keyLabelOf(r *http.Request) string { return keyInfoOf(r).Label }
 
 // 本文件是 **推理面** —— 对外暴露 OpenAI / Anthropic 兼容 API。
 // 三条线：/v1/chat/completions（OpenAI Chat）、/v1/responses（OpenAI Responses）、
@@ -28,6 +65,8 @@ type Gateway struct {
 	keys    *Keys
 	// onUsage 收到一次用量记录。
 	onUsage func(lane.UsageRecord)
+	// log 是日志中心（可为 nil）。
+	log *loghub.Hub
 	// requestTimeout 是单次请求的上限。
 	requestTimeout time.Duration
 	// mu 保护可变开关。
@@ -47,6 +86,9 @@ func NewGateway(router *lane.Router, catalog *lane.Catalog, lanes *lane.Registry
 
 // SetUsageHook 设置用量回调。
 func (g *Gateway) SetUsageHook(fn func(lane.UsageRecord)) { g.onUsage = fn }
+
+// SetLogger 设置日志中心。
+func (g *Gateway) SetLogger(h *loghub.Hub) { g.log = h }
 
 // Routes 返回推理面的路由处理函数。
 func (g *Gateway) Routes() http.Handler {
@@ -82,11 +124,30 @@ func (g *Gateway) handle(next http.HandlerFunc) http.HandlerFunc {
 		//
 		// ⚠️ **管理面不走这里** —— 管理面用**密码**。
 		//   那个区分保证了：推理 Key 泄露 = 白嫖额度，但进不了管理面。
-		presented := BearerOf(r)
-		if !g.keys.MatchAny(presented) {
+		// ⚠️ **逐个凭据尝试**，而不是只看第一个头：
+		//
+		//	Anthropic 风格客户端常同时带 `X-Api-Key` 和
+		//	`Authorization: Bearer`（代理/SDK 各自注入）。
+		//	只认第一个头会出现"实际用的是 B，账却记到 A"——
+		//	用量页的「调用 Key」就会永远显示另一把 Key 的标签。
+		var presented string
+		var info ApiKey
+		for _, cred := range CredentialsOf(r) {
+			if hit, ok := g.keys.Match(cred); ok {
+				presented, info = cred, hit
+				break
+			}
+		}
+		if presented == "" {
 			writeOpenAIError(w, http.StatusUnauthorized, "invalid_request_error", "missing or invalid API key")
 			return
 		}
+		// 把**命中的那把 Key** 挂到 context —— 用量与日志都要用它。
+		r = r.WithContext(context.WithValue(r.Context(), keyInfoCtxKey{}, keyInfo{
+			ID:    info.ID,
+			Label: info.Label,
+			Hint:  store.CredentialHint(info.Key),
+		}))
 		// ⚠️ **两层限流** —— Keys.Allow 里裁决：
 		//
 		//	网关级 != off → 所有 Key 共用网关的桶（强制跟随）
@@ -242,6 +303,14 @@ func (g *Gateway) serveMessages(w http.ResponseWriter, r *http.Request) {
 // run 跑一次推理并把结果写出去。
 func (g *Gateway) run(w http.ResponseWriter, r *http.Request, turn *lane.Turn, stream bool, style lane.EncoderStyle, body map[string]any) {
 	writeCORS(w, r)
+
+	// ⚠️ **把鉴权阶段解析出的 Key 标签带进用量与日志** ——
+	// `handle` 已经把它挂到 context；这里必须**显式搬进 turn**，
+	// 否则 `recordUsage` 拿到的永远是空串，用量页的「调用 Key」列会全是「—」。
+	ki := keyInfoOf(r)
+	turn.KeyLabel = ki.Label
+	turn.KeyID = ki.ID
+	turn.KeyHint = ki.Hint
 
 	// 指纹工具名（要压制它们）。
 	suppress := map[string]bool{"read": true, "shell": true}
@@ -490,6 +559,9 @@ func (g *Gateway) recordUsage(turn *lane.Turn, result *lane.TurnResult, uerr *la
 		// 否则它跟 ActualModel 格式不同，
 		// UI 会把"同一个模型"误判成"发生了切换"。
 		Client:   turn.ClientID,
+		KeyLabel: turn.KeyLabel,
+		KeyID:    turn.KeyID,
+		KeyHint:  turn.KeyHint,
 		Turns:    1,
 		Requests: 1,
 	}
@@ -510,6 +582,44 @@ func (g *Gateway) recordUsage(turn *lane.Turn, result *lane.TurnResult, uerr *la
 		rec.Failed = 1
 	}
 	g.onUsage(rec)
+	if g.log != nil {
+		// ⚠️ 日志里**不写 prompt/回复内容** —— 只记路由结果，够排障又不泄隐私。
+		// ⚠️ 失败时 `rec.Lane`/`rec.ActualModel` 是空的（用量只在成功时记车道）——
+		//   但**日志**必须说明"最后落在哪"，所以用 result 的失败落点补上。
+		laneName, actual := rec.Lane, rec.ActualModel
+		if result != nil {
+			if result.Lane != "" {
+				laneName = result.Lane
+			}
+			if result.Model != "" {
+				actual = result.Model
+			}
+		}
+		if laneName == "" {
+			laneName = "?"
+		}
+		status := "ok"
+		if uerr != nil {
+			status = "失败: " + uerr.Message
+		}
+		// ⚠️ 带上"解码路径" —— 同名模型跨车道的问题，
+		//   只有能看到"请求字符串是怎么变成车道的"才排得动。
+		decode := "?"
+		if result != nil && result.Resolution != "" {
+			decode = result.Resolution
+		}
+		g.log.Log(loghub.CategoryRequest, "key=%q 请求=%s → 实际=%s 车道=%s 解码=%s 尝试=%d 输入=%d 输出=%d %s",
+			turn.KeyLabel, turn.Model, actual, laneName, decode,
+			rec.Attempts, rec.InputTokens, rec.OutputTokens, status)
+		// ⚠️ 每一次物理尝试都留一条证据 —— 用户要能核对"是不是全走了 zen"。
+		//   只有一次且成功时不刷屏；失败或换过候选时逐条记录。
+		if result != nil && (uerr != nil || len(result.Attempted) > 1) {
+			for i, a := range result.Attempted {
+				g.log.Log(loghub.CategoryRequest, "  尝试 #%d 车道=%s 模型=%s 上游=%s 结果=%s",
+					i+1, a.Lane, a.Full, a.Model, a.Result)
+			}
+		}
+	}
 }
 
 // serveCountTokens 做本地 token 估算。

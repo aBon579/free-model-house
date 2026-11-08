@@ -75,6 +75,29 @@ func Open(dataDir string) (*DB, error) {
 // Close 关闭数据库。
 func (d *DB) Close() error { return d.db.Close() }
 
+// OpenMemory 打开一个**内存数据库**并跑真实迁移。
+//
+// ⚠️ 只给测试用 —— 进程退出数据就没了。
+//
+//	它的存在是为了让「迁移 + 用量聚合」这类逻辑能在**没有可写文件系统**
+//	的环境里被真实覆盖（本机 Windows 虚拟盘上的文件型 SQLite 不落盘）。
+func OpenMemory() (*DB, error) {
+	raw, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		return nil, err
+	}
+	// ⚠️ 必须单连接 —— 否则 database/sql 为每个连接开一个独立的
+	//    `:memory:` 数据库，表就"时有时无"。
+	raw.SetMaxOpenConns(1)
+	raw.SetMaxIdleConns(1)
+	d := &DB{db: raw, path: ":memory:"}
+	if err := d.migrate(); err != nil {
+		_ = raw.Close()
+		return nil, err
+	}
+	return d, nil
+}
+
 // Path 返回数据库文件路径。
 func (d *DB) Path() string { return d.path }
 
@@ -134,6 +157,7 @@ func (d *DB) migrate() error {
 			model         TEXT NOT NULL DEFAULT '',
 			actual_model  TEXT NOT NULL DEFAULT '',
 			client        TEXT NOT NULL DEFAULT '',
+			key_label     TEXT NOT NULL DEFAULT '',
 			requests      INTEGER NOT NULL DEFAULT 1,
 			turns         INTEGER NOT NULL DEFAULT 0,
 			attempts      INTEGER NOT NULL DEFAULT 1,
@@ -188,6 +212,17 @@ func (d *DB) migrate() error {
 			enabled    INTEGER NOT NULL DEFAULT 1,
 			created_at INTEGER NOT NULL
 		)`,
+		// ⚠️ **运行日志** —— 按类目记录，界面上可按类目开关。
+		//   关掉某个类目后**不再写入**新日志；历史数据保留在表里，
+		//   但日志页不再显示（见 server 层的过滤逻辑）。
+		`CREATE TABLE IF NOT EXISTS logs (
+			id       INTEGER PRIMARY KEY AUTOINCREMENT,
+			at       INTEGER NOT NULL,
+			category TEXT NOT NULL,
+			message  TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS logs_at ON logs(at)`,
+		`CREATE INDEX IF NOT EXISTS logs_category ON logs(category)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := d.db.Exec(stmt); err != nil {
@@ -211,6 +246,16 @@ func (d *DB) migrate() error {
 	}{
 		{"usage", "cost_usd", "REAL NOT NULL DEFAULT 0"},
 		{"usage_daily", "cost_usd", "REAL NOT NULL DEFAULT 0"},
+		// ⚠️ **key_label** 是这次调用用的那把 FMH 调用 Key 的**标签**
+		//   （Key Hub 里给 Key 起的名字，比如「主 Key」）。
+		//   老数据没有这一列 —— 默认空串，界面上显示「—」。
+		{"usage", "key_label", "TEXT NOT NULL DEFAULT ''"},
+		// ⚠️ **key_id / key_hint** —— 标签不是唯一标识：
+		//   两把 Key 可以同名，也可以都不起名字。
+		//   只按标签聚合会把它们的用量混成一行（看起来像"全都记在主 Key 上"）。
+		//   按 key_id 分组才是"跟着实际命中的那把 Key"。
+		{"usage", "key_id", "TEXT NOT NULL DEFAULT ''"},
+		{"usage", "key_hint", "TEXT NOT NULL DEFAULT ''"},
 	} {
 		_, err := d.db.Exec(fmt.Sprintf(
 			`ALTER TABLE %s ADD COLUMN %s %s`, col.table, col.name, col.def))
@@ -602,10 +647,10 @@ func (d *DB) PutUsage(r lane.UsageRecord) error {
 	defer tx.Rollback()
 
 	_, err = tx.Exec(
-		`INSERT INTO usage (at, day, lane, model, actual_model, client,
+		`INSERT INTO usage (at, day, lane, model, actual_model, client, key_label, key_id, key_hint,
 		   requests, turns, attempts, input_tokens, output_tokens, reasoning_tokens, failed, recovered, cost_usd)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.At, r.Day, r.Lane, r.Model, r.ActualModel, r.Client,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.At, r.Day, r.Lane, r.Model, r.ActualModel, r.Client, r.KeyLabel, r.KeyID, r.KeyHint,
 		r.Requests, r.Turns, r.Attempts, r.InputTokens, r.OutputTokens, r.ReasoningTokens, r.Failed, r.Recovered, r.CostUSD)
 	if err != nil {
 		return err
@@ -670,7 +715,15 @@ type ModelUsage struct {
 	// ActualModel 是**实际服务**的模型。
 	// ⚠️ 它可能与 Model 不同 —— 故障转移是静默的，
 	// UI 要能解释"我请求 A 为什么得到了 B"。
-	ActualModel  string `json:"actualModel"`
+	ActualModel string `json:"actualModel"`
+	// KeyLabel 是这次调用用的 FMH 调用 Key 的**标签**（Key Hub 里起的名字）。
+	// ⚠️ 老数据没有这一维 —— 空串，界面显示「—」。
+	KeyLabel string `json:"keyLabel"`
+	// KeyID / KeyHint 是命中那把 Key 的稳定标识与指纹。
+	//
+	// ⚠️ 标签相同或为空的两把 Key，只有靠 KeyID 才能区分开。
+	KeyID        string `json:"keyId"`
+	KeyHint      string `json:"keyHint"`
 	Requests     int    `json:"requests"`
 	Turns        int    `json:"turns"`
 	InputTokens  int    `json:"inputTokens"`
@@ -685,14 +738,21 @@ type ModelUsage struct {
 }
 
 // ModelUsageAll 读按模型的汇总。
-// ⚠️ 按 (请求模型, 实际模型) 分组 ——
+// ⚠️ 按 (请求模型, 实际模型, 调用 Key **id**) 分组 ——
 // 这样"请求 A 但由 B 应答"在数据里是**看得见的**，
-// 而不是被聚合抹平。
+// 而不是被聚合抹平；两把同名/无名的 Key 也不会被混成一行。
 // ⚠️ **按最新调用时间降序** —— 最近在用的排最上面。
 func (d *DB) ModelUsageAll(since string) ([]ModelUsage, error) {
 	rows, err := d.db.Query(
-		`SELECT model, lane, actual_model, SUM(requests), SUM(turns), SUM(input_tokens), SUM(output_tokens), SUM(failed), SUM(cost_usd), MAX(at)
-		 FROM usage WHERE day >= ? GROUP BY model, lane, actual_model ORDER BY MAX(at) DESC`, since)
+		`SELECT model, lane, actual_model,
+		        COALESCE(MAX(NULLIF(key_label, '')), '') AS key_label,
+		        key_id,
+		        COALESCE(MAX(NULLIF(key_hint, '')), '') AS key_hint,
+		        SUM(requests), SUM(turns), SUM(input_tokens), SUM(output_tokens), SUM(failed), SUM(cost_usd), MAX(at)
+		 FROM usage WHERE day >= ?
+		 GROUP BY model, lane, actual_model, key_id,
+		          CASE WHEN key_id = '' THEN key_label ELSE '' END
+		 ORDER BY MAX(at) DESC`, since)
 	if err != nil {
 		return nil, err
 	}
@@ -700,7 +760,8 @@ func (d *DB) ModelUsageAll(since string) ([]ModelUsage, error) {
 	out := []ModelUsage{}
 	for rows.Next() {
 		var u ModelUsage
-		if err := rows.Scan(&u.Model, &u.Lane, &u.ActualModel, &u.Requests, &u.Turns,
+		if err := rows.Scan(&u.Model, &u.Lane, &u.ActualModel, &u.KeyLabel, &u.KeyID, &u.KeyHint,
+			&u.Requests, &u.Turns,
 			&u.InputTokens, &u.OutputTokens, &u.Failed, &u.CostUSD, &u.LastUsedAt); err != nil {
 			return nil, err
 		}
@@ -739,7 +800,6 @@ func (d *DB) Total(since string) (TotalUsage, error) {
 // timeNowUnixNano 是可注入的时钟。
 var timeNowUnixNano = func() int64 { return time.Now().UnixNano() }
 
-// 设置键名。
 const (
 	// SettingLocalKey 是本机推理 Key。
 	SettingLocalKey = "local_key"
@@ -794,7 +854,7 @@ const (
 	// SettingProbeIntervalMin 是自动探测的间隔（分钟）。
 	SettingProbeIntervalMin = "probe_interval_min"
 	// ⚠️ **没有 SettingProbeBatchSize** —— 探测是**全量**的。
-	//   每 15 分钟把每个免费模型都探一遍，没有"每轮探几个"的概念。
+	//   每 10 分钟把每个免费模型都探一遍，没有"每轮探几个"的概念。
 	//   而且用用户自己 Key 的车道不参与自动探测，
 	//   所以全量探测只花匿名共享池的额度。
 	// SettingLaneEnabled 是"某条车道开不开"的开关。
@@ -819,6 +879,16 @@ const (
 	// ⚠️ **全局一个入口** —— 不按车道分（上游按出口 IP 记账，
 	//   多出口会分散额度而不是解禁）。
 	SettingProxyConfig = "proxy_config"
+	// SettingPlanModels 是**计划性调用列表**（最多 3 个模型 id，按优先级）。
+	//
+	// ⚠️ 只在「自动跨模型调用」开启时生效 ——
+	//   请求模型失败后，按这个顺序依次回落；三个都不可用才回落到模型池。
+	SettingPlanModels = "plan_models"
+	// SettingCustomProviders 是**Key Hub 自定义 OpenAI 兼容端点**的元数据（JSON）。
+	//
+	// ⚠️ **Key 本身不在这里** —— key 存进加密的 secrets 表
+	//   （名字是 `custom_key:<id>`），这里只有 id/名称/BaseURL/模型清单。
+	SettingCustomProviders = "custom_providers"
 )
 
 // PutJSON 存一个 JSON 值（给设置用）。

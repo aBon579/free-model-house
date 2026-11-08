@@ -1,6 +1,9 @@
 package server
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // 调用 Key 的业务错误。
 //
@@ -10,6 +13,24 @@ import "fmt"
 // errLabelTooLong 标签超过 6 字符。
 func errLabelTooLong(got int) error {
 	return fmt.Errorf("标签最多 %d 个字（现在 %d 个）—— 名字太长认不出是谁就失去意义了", MaxKeyLabelChars, got)
+}
+
+// errLabelRequired 标签必填。
+//
+// ⚠️ 标签是用户在用量/日志里**区分 Key 的唯一线索** ——
+// 空标签等于没有线索；历史上已有的空标签不自动改，
+// 但新建/改名都必须补上。
+func errLabelRequired() error {
+	return errors.New("标签必填 —— 否则用量和日志里分不清是哪把 Key")
+}
+
+// errLabelDuplicate 标签已经被别的 Key 占用。
+//
+// ⚠️ 标签是用户在用量/日志里**区分 Key 的唯一线索** ——
+// 允许重名就等于把这条线索作废（两个设备都叫"家里"根本分不清）。
+// 大小写与首尾空白不算差异（`Phone` 与 ` phone ` 视为同名）。
+func errLabelDuplicate(label string) error {
+	return fmt.Errorf("标签「%s」已被其他 Key 使用 —— 换个名字，否则用量和日志里分不清是谁", label)
 }
 
 // errKeyNotFound 找不到那把 Key。

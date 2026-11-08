@@ -11,6 +11,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Plug,
+  ScrollText,
   Settings as SettingsIcon,
   Sun,
   Waypoints,
@@ -25,6 +26,7 @@ export type RouteKey =
   | 'quickstart'
   | 'models'
   | 'usage'
+  | 'logs'
   | 'sources'
   | 'access'
   | 'proxy'
@@ -50,6 +52,9 @@ const navItems: NavItem[] = [
   // ⚠️ 用量和上游源**原本都是 Activity 图标** —— 侧栏上一模一样，
   //   根本分不出哪个是哪个。现在用量的柱状图，上游源的汇聚点。
   { key: 'usage', label: '用量', icon: ChartNoAxesColumn, group: '运行' },
+  // ⚠️ **日志** —— 分类运行事件（调用/探测/Key/车道/系统），
+  //   每个类目可以单独开关。
+  { key: 'logs', label: '日志', icon: ScrollText, group: '运行' },
   { key: 'sources', label: '上游源', icon: Waypoints, group: '运行' },
   // ⚠️ **Key Hub 是"给谁、给多少"的运行服务设置** —— 运行组；
   //   **出口代理是网络层配置** —— 系统组。

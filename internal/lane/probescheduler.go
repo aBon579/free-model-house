@@ -11,14 +11,19 @@ import (
 // 免密车道的可用性是**波动的** —— 模型随时可能被限流、被风控、被下线。
 // 只靠启动时拉一次的清单，用户看到的永远是"未知"。
 // ⚠️ **但探测要花钱** —— 每次探测 = 一次真实推理。
-// 28 个模型全探一遍，一天就是 28 × 144 = 4032 次推理，
-// 对"免费"车道来说是浪费。所以策略是**按需探测**，不是全量轮询：
-//	① 轮转 —— 每次只探 N 个，用轮转覆盖全部
-//	② 只探过期的 —— 新鲜的结论不重复探
-//	③ 限流的跳过 —— 冷却中的模型不探（探了也是 429）
-//	④ 并发上限
-//	⑤ 失败退避 —— 连续失败的模型探得越来越稀
-//	⑥ 只探免费的 —— 万一上游改成"先扣费再校验"就会真扣钱
+//
+// 两种模式（由「探测批量自适应」决定）：
+//	① **关闭（默认）** —— 每一轮都**全量**探测：
+//	   所有参与自动探测的模型（免费 + `AutoProbeable` 车道）都会被探。
+//	   数量**恒等于池子大小**，不会"一会多一会少"。
+//	② **开启** —— 才允许分批：按「上次探测最久远的优先」排好序，
+//	   每轮取前 N 个（N = 批量上限），并立即记账 ——
+//	   下一轮自然轮到没探过的那些，轮转不重复、可收敛。
+//
+// 两种模式共用的闸门：
+//	③ 并发上限
+//	④ 只探免费的 —— 万一上游改成"先扣费再校验"就会真扣钱
+//	⑤ 不参与自动探测的车道（自定义 / OR）一律排除
 // ⚠️ "免费判定"和"可用性探测"是两回事：
 // 前者用 `ProbeFree` 的 `401 "Missing API key"`（0 次推理），
 // 后者要真打一次推理（1 次）才能判"现在能不能用"。
@@ -46,10 +51,11 @@ type ProbeScheduler struct {
 	interval time.Duration
 
 	// adaptiveBatch 是**自适应批量**的开关。
-	// ⚠️ 为什么需要它：免密车道的配额是**全局共享**的。
-	// 高峰期上游在限流 —— 这时候继续按正常节奏探测，
-	// 就是**拿真金白银去撞限流墙**：探到的全是 429，
-	// 既费额度又拿不到有效信息。所以：**上游越拥挤，探得越少**。
+	//
+	// ⚠️ **默认关闭** —— 关闭时每轮**全量**探测，
+	//   面板上的结论才是一致的、数量才是可预期的。
+	// 开启后才允许分批（见 pickTargets），且规则是确定的：
+	//   上次探测最久远的优先 + 每轮最多 batchSize 个。
 	adaptiveBatch bool
 	// minBatch 是自适应批量的下限（不能探 0 个）。
 	minBatch int
@@ -87,11 +93,12 @@ type ProbeScheduler struct {
 	// roundAvailable 是本轮探通了几个。
 	roundAvailable int
 
-	cursor int
-	// backoff 记录每个模型的连续失败次数。
-	backoff map[string]int
-	// lastRound 记录每个模型上次被探的轮次（用于退避计算）。
-	lastRound map[string]int
+	// pickGen 是分批轮转的**代次** —— 每做一次分批选取 +1。
+	pickGen int
+	// lastPicked 记录每个模型上次被选中的代次（0 = 从没被选中过）。
+	// ⚠️ 用独立代次而不是轮次号 —— 手动 `PickTargets` 不经过轮次自增，
+	//   用轮次号会让"直接连选几次"永远选同一批。
+	lastPicked map[string]int
 	// round 是当前的轮次编号。
 	round int
 	// enabled 是自动探测的开关。
@@ -282,15 +289,15 @@ func NewProbeScheduler(catalog *Catalog, lanes *Registry, opts ProbeOptions) *Pr
 		opts.Interval = 10 * time.Minute
 	}
 	return &ProbeScheduler{
-		catalog:       catalog,
-		lanes:         lanes,
-		batchSize:     opts.BatchSize,
-		concurrency:   opts.Concurrency,
-		interval:      opts.Interval,
-		backoff:       map[string]int{},
-		lastRound:     map[string]int{},
-		enabled:       true,
-		adaptiveBatch: true,
+		catalog:     catalog,
+		lanes:       lanes,
+		batchSize:   opts.BatchSize,
+		concurrency: opts.Concurrency,
+		interval:    opts.Interval,
+		lastPicked:  map[string]int{},
+		enabled:     true,
+		// ⚠️ **默认关闭** —— 关闭 = 每轮全量。
+		adaptiveBatch: false,
 		minBatch:      1,
 	}
 }
@@ -872,18 +879,9 @@ func (s *ProbeScheduler) finishProbe(result ProbeResult, inRound bool) {
 	}
 	s.mu.Lock()
 	hook := s.onResult
-	// ⚠️ 失败退避 —— 连续失败的模型探得越来越稀。
-	// 理由：一个一直报错的模型，每轮都探它就是**纯浪费**。
-	// 退避让配额花在更可能恢复的模型上。
-	switch result.State {
-	case StateAvailable:
-		s.backoff[result.Model] = 0
-	default:
-		s.backoff[result.Model]++
-	}
 	// ⚠️ **退避与轮次号只对批量轮次记账** ——
-	//   手动单探不该把模型的"连续失败次数"也刷上去，
-	//   否则一次手动探测失败会让模型在自动轮里多躲几轮。
+	//   手动单探不该把"上次被探的轮次"刷上去，
+	//   否则一次手动探测会让模型在自动轮的分批里被跳过。
 	if inRound {
 		switch result.State {
 		case StateAvailable:
@@ -892,7 +890,6 @@ func (s *ProbeScheduler) finishProbe(result ProbeResult, inRound bool) {
 			//   不能只说"8 个失败"（那会让人以为全挂了）。
 			s.roundAvailable++
 		}
-		s.lastRound[result.Model] = s.round
 		// ⚠️ **更新限流比例** —— 给下一轮的自适应批量用。
 		// ⚠️ 只算"限流"，不算其它失败 ——
 		//   闸门拒绝/模型下架**不是**拥挤，它们不会因为少探就恢复。
@@ -979,188 +976,120 @@ func (s *ProbeScheduler) ProbeOne(ctx context.Context, model string) ProbeResult
 }
 
 // PickTargets 选出这一轮要探的模型。
-// ⚠️ 选择规则（按优先级）：
+//
+// ⚠️ 选择规则：
 //
 //	① 只探**清单里标记免费**的模型 —— 探测付费模型可能真扣钱
-//	② 跳过**限流冷却中**的 —— 探了也是 429
-//	③ 按**失败退避**过滤 —— 连续失败的少探
+//	② 排除**不参与自动探测**的车道（自定义 / OR）
+//	③ **关闭自适应（默认）= 全量** —— 池子里的每个模型都探
+//	④ **开启自适应 = 分批** —— 上次探测最久远的优先，每轮最多 batchSize 个
 //
-// ⚠️ **不再跳过"结论还新鲜"的** ——
+// ⚠️ **不再按"结论新鲜 / 失败退避 / 限流冷却"跳过** ——
 //
-// 之前有"10 分钟 TTL 内不探"这条，理由是省额度。
-// 但那个 TTL 是 10 分钟，而探测间隔也是 10 分钟 ——
-// 于是**每轮几乎所有模型都被 TTL 跳过**，探测形同虚设。
+//	那三条都会让每轮的数量随上轮结果漂移，用户看到的就是
+//	"一会多一会少，规则不可预期"。现在：
+//	- 关闭自适应：数量恒等于池子大小；
+//	- 开启自适应：数量恒等于 min(batchSize, 池子大小)（限流时才临时收缩）。
 //
-// 现在改成：**每 15 分钟全量探一遍**。
-// 15 分钟 > ProbeTTL(10 分钟)，所以每轮每个模型都会被重新测一次 ——
-// 结论永远是新鲜的，不会出现"面板上的状态是十几分钟前的"。
-//
-// ⚠️ **代价**：每轮要发的请求数 = 模型数。
-//
-//	所以：
-//	- 并发上限仍然是 2（别把上游打疼）；
-//	- 限流退避仍然生效（全被限流时整轮退避）；
-//	- 失败退避仍然生效（一直失败的少探）。
-//
-// 排序：先探"最可能被路由用到"的 ——
-// 可用的优先（它们在候选链里排前面），然后按延迟。
+// 排序是**确定**的：先按上次被探的轮次（最久远的在前），再按模型 id。
+// 所以同一份清单、同样的状态，每轮的选择完全可复现。
 func (s *ProbeScheduler) PickTargets() []probeTarget {
 	return s.pickTargets(false)
 }
 
 // pickTargets 选出这一轮要探的模型。
 //
-// ⚠️ `manual` 表示这是**用户手动触发**的 ——
+// ⚠️ `manual` 表示这是**用户手动触发**的 —— 手动探测**永远全量**：
 //
-//	手动探测**无视"结论还新鲜"**那条规则。
+//	用户点「探测一轮」就是想现在把每个模型都看一遍。
 func (s *ProbeScheduler) pickTargets(manual bool) []probeTarget {
 	models := s.catalog.Models()
 
-	// 候选池。
+	// 候选池 = **免费** + **参与自动探测的车道**。
+	// ⚠️ 用模型 id 去重 —— 防御清单里出现重复行。
 	pool := make([]probeTarget, 0, len(models))
+	seen := make(map[string]bool, len(models))
 	for _, m := range models {
-		// ⚠️ **只探免费的**。
+		// ⚠️ **只探免费的** —— 探测付费模型可能真扣钱。
 		if !m.Free {
+			continue
+		}
+		if seen[m.ID] {
 			continue
 		}
 		// ⚠️ **用用户自己 Key 的车道不参与自动探测** ——
 		//
 		//	实测（2026-10-20）：一轮 18 个 OR 模型就把当天的
 		//	`free-models-per-day` 配额打满了。
-		//	那是**用户自己的额度** —— 拿它做每 15 分钟一轮的
-		//	全量探测不合适。
-		//
-		//	OR 的可用性由**真实流量**验证（面板上的"实际服务"列）。
+		//	那是**用户自己的额度** —— 拿它做每 10 分钟一轮的
+		//	全量探测不合适。OR 的可用性由**真实流量**验证。
 		if l, ok := s.lanes.Get(m.Lane); ok && !laneAutoProbeable(l) {
 			continue
 		}
-		// ⚠️ **结论还新鲜 → 不探**（**自动探测**才这样）。
-		//
-		//	这条规则跟"15 分钟全量"**不冲突**：
-		//	间隔（15 分钟）> TTL（10 分钟），
-		//	所以每轮开始时结论都已经过期，**全部会被探**。
-		//
-		//	它只挡两种情况：
-		//	① 用户在管理台上连点两次「探测」；
-		//	② 手动探测紧接着自动探测。
-		//
-		//	这两种情况下重复探 = 重复花钱。
-		//
-		// ⚠️ **但手动探测无视它** ——
-		//
-		//	用户点了「探测一轮」就是想**现在**重新探一遍。
-		//	如果因为"结论还新鲜"就跳过全部模型 ——
-		//	那按钮按下去**什么都不会发生**，
-		//	用户看到的是"探测完成，0 个模型" —— 那是骗人。
-		//
-		//	而且这条规则本来就是为**自动探测**省额度设计的，
-		//	手动探测是用户**明确表达**的意图，该花就花。
-		if !manual {
-			if p := s.catalog.Probe(m.ID); p.Fresh(ProbeTTL) {
-				continue
-			}
-		}
-
-		s.mu.Lock()
-		failures := s.backoff[m.ID]
-		lastRound := s.lastRound[m.ID]
-		s.mu.Unlock()
-
-		// ⚠️ **失败退避** —— 连续失败的模型要**等几轮**再探。
-		// 理由：一个一直报错的模型，每轮都探它就是**纯浪费**。
-		// 退避让配额花在更可能恢复的模型上。
-		// 退避轮数 = 连续失败次数（线性，不是指数 ——
-		// 指数退避对"每 15 分钟一轮"来说太狠了，
-		// 一个瞬时故障会让模型消失好几十分钟）。
-		//
-		// ⚠️ **手动探测无视退避** ——
-		//
-		//	自动探测时退避是为了**省额度**；
-		//	手动探测是用户明确要看"现在到底行不行" ——
-		//	那个一直失败的模型**恰恰是他最想知道的**。
-		if !manual {
-			if failures > 0 && s.round-lastRound < failures {
-				continue
-			}
-			// ⚠️ 连续失败太多 → **彻底不再自动探**。
-			// 5 次连续失败多半是**上游收紧了**，继续探只是烧配额。
-			// 但也不能太低 —— 一次抖动不该让模型消失。
-			if failures >= maxProbeBackoff {
-				continue
-			}
-		}
-		pool = append(pool, probeTarget{Model: m.ID, Lane: m.Lane, Backoff: failures})
+		seen[m.ID] = true
+		pool = append(pool, probeTarget{Model: m.ID, Lane: m.Lane})
 	}
 
 	if len(pool) == 0 {
 		return nil
 	}
 
-	// 排序：退避少的优先（更可能恢复），然后按 id 保证稳定。
+	// 读状态（不持有 catalog 锁，只短暂持有自己的锁）。
+	s.mu.Lock()
+	adaptive := s.adaptiveBatch
+	for i := range pool {
+		pool[i].Picked = s.lastPicked[pool[i].Model]
+	}
+	s.mu.Unlock()
+
+	// ⚠️ **确定性排序** —— 上次被选中最久远的优先（从没选过 = 0，排最前），
+	//   同代次按模型 id。同一份清单、同样的状态 → 每轮顺序完全一致。
 	sort.SliceStable(pool, func(i, j int) bool {
-		if pool[i].Backoff != pool[j].Backoff {
-			return pool[i].Backoff < pool[j].Backoff
+		if pool[i].Picked != pool[j].Picked {
+			return pool[i].Picked < pool[j].Picked
 		}
 		return pool[i].Model < pool[j].Model
 	})
 
-	// ⚠️ **全量** —— 每一轮都探完整个池子。
+	// ⚠️ **关闭自适应（默认）→ 全量** —— 每轮都把池子探完。
+	// 手动探测同理：用户要的就是"现在全看一遍"。
+	if manual || !adaptive {
+		return pool
+	}
+
+	// ⚠️ **开启自适应 → 分批**。
 	//
-	// 之前是"取 N 个"，于是：
-	//   - 面板上有一半模型永远是"未探测"；
-	//   - 用户的模型可能在几轮里才被探到一次。
-	// 现在**一轮 = 一次全量快照**，面板上的状态是一致的。
-	//
-	// ⚠️ 代价（每轮 = 模型数个请求）由这几道闸门控制：
-	//   - 并发上限 2；
-	//   - 失败退避（一直失败的少探）；
-	//   - 全被限流时整轮指数退避。
-	//
-	// ⚠️ 但**限流时**还是要少探 ——
-	//   上游拥挤时继续按全量打，就是拿额度撞限流墙。
-	//   所以自适应批量在这里**仍然生效**，只是基数变成池子大小。
+	//	按上面的确定性顺序取前 N 个，并**立即记账**（代次 +1）——
+	//	下一轮排序时它们会排到后面，于是自然轮到没选过的模型。
+	//	所以：相邻轮次**不重复**，覆盖一圈后可预期地收敛（回到开头）。
 	s.mu.Lock()
 	batch := s.currentBatchLocked(len(pool))
-	s.mu.Unlock()
-
-	if batch <= 0 {
+	if batch <= 0 || batch > len(pool) {
 		batch = len(pool)
 	}
-
-	// ⚠️ **轮转**：从游标开始取，游标前移。
-	// 不这么做的话，限流时每轮都探同一批"排序最前"的模型，
-	// 后面的模型永远探不到。
-	s.mu.Lock()
-	start := s.cursor % len(pool)
-	s.mu.Unlock()
-
-	out := make([]probeTarget, 0, batch)
-	for i := 0; i < len(pool) && len(out) < batch; i++ {
-		out = append(out, pool[(start+i)%len(pool)])
+	s.pickGen++
+	for _, t := range pool[:batch] {
+		s.lastPicked[t.Model] = s.pickGen
 	}
-
-	s.mu.Lock()
-	s.cursor = (start + len(out)) % len(pool)
 	s.mu.Unlock()
 
-	return out
+	return pool[:batch]
 }
 
+// DefaultAdaptiveBatch 是**开启自适应**时每轮的批量上限。
+//
+// ⚠️ 关闭自适应（默认）时**不使用**它 —— 那时每轮是全量。
+const DefaultAdaptiveBatch = 8
+
 // currentBatchLocked 算这一轮**实际**探几个。
-// ⚠️ **自适应** —— 上游越拥挤，探得越少。
-// 理由：免密车道的配额是**全局共享**的。
-// 高峰期上游在限流 —— 这时候按正常节奏探测，
-// 就是**拿真金白银去撞限流墙**：
-// 探到的全是 429，既费额度又拿不到有效信息。
-// 所以要让"探测的成本"跟着"上游的拥挤程度"一起降。
-// 判据：**上一轮候选池里限流的比例**。
 //
-//	0% 限流   → 全额探（池子多大就探多大）
-//	75%+ 限流 → 1/4（但至少 minBatch 个）
+//	关闭自适应        → 池子多大就探多大（**全量**）
+//	开启自适应        → min(batchSize, 池子大小)
+//	开启 + 上游越拥挤 → 按上轮限流比例再收缩（至少 minBatch 个）
 //
-// ⚠️ **基数是候选池的大小**，不是固定的 batchSize ——
+// ⚠️ 这里不能访问 catalog（会死锁 —— catalog 有自己的锁，
 //
-//	因为一轮就是一次全量快照。
+//	而 PickTargets 可能已经持有它）。所以用**上轮的结果**来算。
 //
 // ⚠️ 调用方必须**持有锁**。
 func (s *ProbeScheduler) currentBatchLocked(poolSize int) int {
@@ -1170,13 +1099,14 @@ func (s *ProbeScheduler) currentBatchLocked(poolSize int) int {
 	if !s.adaptiveBatch {
 		return poolSize
 	}
-	// ⚠️ 这里不能访问 catalog（会死锁 —— catalog 有自己的锁，
-	//   而 PickTargets 可能已经持有它）。
-	// 所以用**上轮的结果**来算 ——
-	// 上一轮的限流比例是"上一刻的拥挤程度"，
-	// 对下一轮来说是很好的预测。
+	// 开启自适应：基数是**批量上限**，不是池子大小 ——
+	// 否则"自适应"等于没开（池子多大就探多大）。
+	base := s.batchSize
+	if base <= 0 || base > poolSize {
+		base = poolSize
+	}
 	if s.lastThrottleRatio <= 0 {
-		return poolSize
+		return base
 	}
 	ratio := s.lastThrottleRatio
 	factor := 1.0
@@ -1188,21 +1118,30 @@ func (s *ProbeScheduler) currentBatchLocked(poolSize int) int {
 	case ratio >= 0.25:
 		factor = 0.75
 	}
-	batch := int(float64(poolSize) * factor)
+	batch := int(float64(base) * factor)
 	if batch < s.minBatch {
 		batch = s.minBatch
 	}
-	if batch > poolSize {
-		batch = poolSize
+	if batch > base {
+		batch = base
 	}
 	return batch
 }
 
 // SetAdaptiveBatch 开/关自适应批量。
+//
+// ⚠️ **关闭 = 每轮全量**；开启 = 按确定性规则分批。
 func (s *ProbeScheduler) SetAdaptiveBatch(on bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.adaptiveBatch = on
+}
+
+// AdaptiveBatch 返回当前是否开启自适应批量（给状态展示用）。
+func (s *ProbeScheduler) AdaptiveBatch() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.adaptiveBatch
 }
 
 // probeTarget 是一个探测目标。
@@ -1212,14 +1151,10 @@ type probeTarget struct {
 	// ⚠️ 用它当键 —— 不同车道的同名模型天然不撞。
 	Model string
 	Lane  string
-	// Backoff 是连续失败次数。
-	Backoff int
+	// Picked 是这个模型**上次被选中探测的代次**（0 = 从没选过）。
+	// 分批时按它升序排 —— 最久没选中的优先。
+	Picked int
 }
-
-// maxProbeBackoff 是连续失败多少次后不再自动探测。
-// ⚠️ 刻意**不设太高** —— 一个模型连续失败 5 次，多半是**上游收紧了**，
-// 继续探只是烧配额。但也不能太低 —— 一次抖动不该让模型消失。
-const maxProbeBackoff = 5
 
 // ProbeSummary 是一轮探测的统计。
 type ProbeSummary struct {
