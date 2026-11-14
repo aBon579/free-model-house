@@ -24,6 +24,11 @@
 # 实测方法与闸门矩阵，公开等于给上游递刀。
 /docs/upstream-notes.md
 /docs/design/05-what-we-fake.md
+# 参考项目的原始客户端代码（2.4 MB），只是我复现行为时的对照件：
+# 没有任何构建依赖 —— Dockerfile.offline 只 COPY dist/，fmh-upload 里
+# 干脆没有 tools/ 目录，照样 build + test 全绿。
+/tools/reference-qoder/
+/tools/reference-trae-zcode/
 
 # ── 一次性的重构/审计脚本 ──
 /tools/trim-comments.py
