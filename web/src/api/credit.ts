@@ -38,7 +38,13 @@ export interface Account {
   credits?: Credits
   error?: string
   cooldownUntil?: number
+  // 领取失败的分档暂停，只影响自动领取；与 cooldownUntil（推理车道的闸门）无关。
+  // claimCooldownUntil 为负 = 停到人工解除（重新登录 / 刷新凭据 / 重置状态）。
+  claimCooldownUntil?: number
+  claimCooldownKind?: ClaimCooldownKind
 }
+
+export type ClaimCooldownKind = 'credential' | 'plan' | 'server' | 'rate' | string
 
 export interface Provider {
   id: ProviderId
@@ -86,6 +92,8 @@ export interface ActionResult {
   credits?: Credits
   results?: { id: string; name: string; claimed: boolean; alreadyClaimed: boolean; amount?: number; message: string }[]
   message?: string
+  // 领取动作回带的分档：批量签到靠它决定要不要停止往下一个号撞。
+  claimHold?: { kind?: string; untilMs?: number }
 }
 
 export interface ImportAccount {

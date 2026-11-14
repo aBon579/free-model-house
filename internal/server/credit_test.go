@@ -315,3 +315,36 @@ func TestCreditDisabledSaysSo(t *testing.T) {
 		t.Error("未启用也要说明原因")
 	}
 }
+
+// TestCreditClaimFailureKeepsAdminSession 锁住"领取失败不许把管理员踢下线"。
+//
+// 上游回的 401 说的是**用户那个账号的凭据**没了，与管理台会话无关。
+// 而前端 web/src/api/credit.ts 的 request() 一见到 HTTP 401 就 dispatch('fmh:logout')，
+// 所以领取这一条必须用 200 + ok:false 表达失败，并把分档回带给他做整批早停。
+func TestCreditClaimFailureKeepsAdminSession(t *testing.T) {
+	_, s, session := newCreditAdmin(t, true)
+	rec := creditRequest(t, s, session, http.MethodPost, "/api/credit/accounts",
+		`{"provider":"qoder","name":"签到用","credential":{"accessToken":"at-secret","uid":"uid-1","machineId":"mid-1"}}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("添加账户失败：%d %s", rec.Code, rec.Body.String())
+	}
+	id := decodeCredit(t, rec)["account"].(map[string]any)["id"].(string)
+
+	rec = creditRequest(t, s, session, http.MethodPost, "/api/credit/accounts/action", `{"id":"`+id+`","action":"claim"}`)
+	if rec.Code == http.StatusUnauthorized {
+		t.Fatalf("领取失败回 HTTP 401 会让前端把管理员踢下线：%s", rec.Body.String())
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("领取失败也应当 200 + ok:false，实际 %d：%s", rec.Code, rec.Body.String())
+	}
+	doc := decodeCredit(t, rec)
+	if doc["ok"] != false {
+		t.Fatalf("上游连不上时不许报 ok=true：%v", doc)
+	}
+	if msg, _ := doc["message"].(string); msg == "" {
+		t.Error("要说清楚为什么没领成")
+	}
+	if _, has := doc["claimHold"]; !has {
+		t.Error("要回带 claimHold，批量签到靠它决定要不要整批早停")
+	}
+}

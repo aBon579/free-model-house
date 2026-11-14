@@ -123,6 +123,14 @@ type Adapter interface {
 	Prepare(context.Context, Credential, Inference) (Prepared, error)
 }
 
+// ErrUpstreamTransport / ErrUpstreamBadBody 把"上游连不上 / 答非所问"做成可被
+// errors.Is 认出来的哨兵。领取失败要按错误类型决定暂停多久，靠比错误文案判定
+// 会在有人顺手改一句提示时静默失效。
+var (
+	ErrUpstreamTransport = errors.New("无法连接上游，请检查出口代理或稍后重试")
+	ErrUpstreamBadBody   = errors.New("上游返回了无法解析的数据")
+)
+
 // APIError 是上游判决在本项目里的形状。
 //
 // ⚠️ Message 只许放**能安全展示给用户**的话：它会经 writeCreditError 原样
@@ -164,7 +172,7 @@ func JSONRequest(ctx context.Context, client *http.Client, method, endpoint stri
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		return errors.New("无法连接上游，请检查出口代理或稍后重试")
+		return ErrUpstreamTransport
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -174,7 +182,7 @@ func JSONRequest(ctx context.Context, client *http.Client, method, endpoint stri
 		return nil
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(out); err != nil {
-		return errors.New("上游返回了无法解析的数据")
+		return ErrUpstreamBadBody
 	}
 	return nil
 }

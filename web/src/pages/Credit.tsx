@@ -37,6 +37,22 @@ function quantity(value?: number) {
   return typeof value === 'number' && Number.isFinite(value) ? value.toLocaleString(undefined, { maximumFractionDigits: 6 }) : '未知'
 }
 
+// 领取分档的中文名。这些档位只影响自动领取，跟推理车道的 cooldownUntil 是两套开关。
+const claimHoldNames: Record<string, string> = { credential: '凭据失效', plan: '套餐上限', server: '上游异常', rate: '领取过快' }
+
+function claimHoldName(kind?: string) {
+  return (kind && claimHoldNames[kind]) || kind || '无'
+}
+
+function claimHoldText(account: Account) {
+  if (!account.claimCooldownKind) return ''
+  if (account.claimCooldownKind === 'credential' || (account.claimCooldownUntil ?? 0) < 0) {
+    return `已暂停（${claimHoldName(account.claimCooldownKind)}，需重新登录、刷新凭据或重置状态）`
+  }
+  const until = new Date(account.claimCooldownUntil ?? 0)
+  return `暂停至 ${until.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}（${claimHoldName(account.claimCooldownKind)}）`
+}
+
 function isObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
 }
@@ -484,11 +500,15 @@ export function Credit() {
       toast.ok('账户设置已更新')
     } finally { unlock(body.id) }
   }
-  async function runAction(account: Account, action: AccountAction, options: { quiet?: boolean } = {}) {
+  async function runAction(account: Account, action: AccountAction, options: { quiet?: boolean } = {}): Promise<ActionResult | undefined> {
     if (!lock(account.id)) return
     setOutcomes(values => ({ ...values, [account.id]: { state: 'running', text: '正在处理…' } }))
+    // settled 是"后端到底怎么答的"，与页面把它显示成成功还是失败无关：
+    // 领取失败也带 claimHold 回来，批量签到要靠它做整批早停，所以不能只留成功那条路。
+    let settled: ActionResult | undefined
     try {
       const result = await creditApi.action(action)
+      settled = result
       if (!result.ok) throw new Error(result.message || '操作未成功，请查看账户状态后重试。')
       const hasFailed = result.results?.some(item => !item.claimed && !item.alreadyClaimed) ?? false
       const text = result.message || (hasFailed ? '部分活动未领取，请查看逐项结果。' : action.action === 'claim' ? '签到请求已完成，实际领取情况见下方结果。' : '操作完成')
@@ -504,6 +524,7 @@ export function Credit() {
       if (action.action === 'credits') setCreditErrors(values => ({ ...values, [account.id]: text }))
       if (!options.quiet) toast.bad(`${account.name}：${text}`)
     } finally { unlock(account.id); if (mounted.current) refresh() }
+    return settled
   }
   function claim(account: Account, campaignId?: string) {
     void runAction(account, { id: account.id, action: 'claim', ...(campaignId ? { campaignId } : {}) })
@@ -513,12 +534,26 @@ export function Credit() {
     batchLock.current = true
     setBatch(true)
     const targets = visible.filter(account => account.enabled && !busyIds.has(account.id))
+    // 同类领取错误连着两个号就整批停：429/9074 是"你太快了"、1005 是套餐级上限、
+    // 401 是凭据没了 —— 这几种判决跟是哪个号无关，接着往下撞只是把一次点击
+    // 放大成"账号数 × 一轮完整上游请求"。所以第 2 个号照常试（万一是单号问题），
+    // 第 3 个开始不试了。
+    let lastKind = ''
+    let repeat = 0
+    let stopped = false
     try {
       for (const account of targets) {
         if (!mounted.current) break
-        await runAction(account, { id: account.id, action: 'claim' }, { quiet: true })
+        const result = await runAction(account, { id: account.id, action: 'claim' }, { quiet: true })
+        const kind = result?.claimHold?.kind ?? ''
+        if (!kind) { lastKind = ''; repeat = 0; continue }
+        repeat = kind === lastKind ? repeat + 1 : 1
+        lastKind = kind
+        if (repeat >= 2) { stopped = true; break }
       }
-      if (mounted.current) toast.info('本轮已逐号处理，请查看每个账户的领取结果。')
+      if (!mounted.current) return
+      if (stopped) toast.bad(`连续两个账号返回同一类领取错误（${claimHoldName(lastKind)}），本渠道剩余账号本轮未尝试；自动领取会按冷却顺延，手动「单号签到」不受限。`)
+      else toast.info('本轮已逐号处理，请查看每个账户的领取结果。')
     } finally { batchLock.current = false; if (mounted.current) setBatch(false) }
   }
   const busy = (account: Account) => busyIds.has(account.id) || batch
@@ -544,7 +579,7 @@ export function Credit() {
                 <div className="flex flex-wrap items-center gap-2"><Button size="sm" disabled={accountBusy} onClick={() => void runAction(account, { id: account.id, action: 'credits' })}><Wallet size={13} />查询余额</Button><Button size="sm" disabled={accountBusy} onClick={() => claim(account)}><Gift size={13} />单号签到</Button><Button size="sm" disabled={accountBusy} onClick={() => void runAction(account, { id: account.id, action: 'refresh' })}><KeyRound size={13} />刷新凭据</Button><Button size="sm" disabled={accountBusy} onClick={() => void runAction(account, { id: account.id, action: 'models' })}><RefreshCw size={13} />刷新模型</Button>{provider?.loginModes.length ? <Button size="sm" disabled={accountBusy} onClick={() => setDialog({ kind: 'login', provider, accountId: account.id })}>重新登录</Button> : null}<Button size="sm" variant="ghost" disabled={accountBusy} onClick={() => setDialog({ kind: 'test', account })}>手动测试（耗额度）</Button><Button size="sm" variant="ghost" disabled={accountBusy} onClick={() => setDialog({ kind: 'reset', account })}>重置状态</Button>{busyIds.has(account.id) && <Spinner />}</div>
                 {outcome && <div aria-live="polite" className="space-y-2"><Notice tone={outcome.state === 'error' ? 'bad' : outcome.state === 'ok' ? 'ok' : 'accent'}>{outcome.text}</Notice>{outcome.result?.results?.map((result, resultIndex) => <div key={`${result.id}-${resultIndex}`} className="flex flex-wrap items-center gap-2 text-[12px]"><Badge tone={result.claimed || result.alreadyClaimed ? 'ok' : 'bad'}>{result.alreadyClaimed ? '已领过' : result.claimed ? '领取成功' : '未领取'}</Badge><span>{result.name} · 数量 {quantity(result.amount)}</span><span className="text-[var(--ink-3)]">{result.message}</span></div>)}</div>}
                 <CreditBalances credits={account.credits} staleError={creditErrors[account.id]} busy={accountBusy} onClaim={campaignId => claim(account, campaignId)} />
-                <div className="flex flex-wrap gap-x-4 gap-y-1 border-t border-[var(--line)] pt-2 text-[11.5px] text-[var(--ink-3)]"><span>模型 {modelList(account).length || '未知'} · 禁用 {account.disabledModels.length}</span><span>effort：{account.effort || '默认'}</span><span>Max Mode：{account.maxMode ? '开启' : '关闭'}</span><span>自动领取：{account.autoClaimAt || '关闭'}</span></div>
+                <div className="flex flex-wrap gap-x-4 gap-y-1 border-t border-[var(--line)] pt-2 text-[11.5px] text-[var(--ink-3)]"><span>模型 {modelList(account).length || '未知'} · 禁用 {account.disabledModels.length}</span><span>effort：{account.effort || '默认'}</span><span>Max Mode：{account.maxMode ? '开启' : '关闭'}</span><span>自动领取：{account.autoClaimAt || '关闭'}</span>{account.claimCooldownKind ? <span className="text-[var(--bad)]">签到冷却：{claimHoldText(account)}</span> : null}</div>
               </CardBody>
             </Card>
           })}
@@ -555,7 +590,7 @@ export function Credit() {
       {dialog?.kind === 'edit' && <AccountSettings account={dialog.account} models={modelList(dialog.account)} onClose={() => setDialog(null)} onSave={update} />}
       {dialog?.kind === 'delete' && <ConfirmDialog title="删除账户" label="确认删除" danger onClose={() => setDialog(null)} onConfirm={async () => { const result = await creditApi.delete(dialog.account.id); if (!result.ok) throw new Error('删除未成功'); refresh(); toast.ok('账户已删除') }}><Notice tone="warn">确定删除“{dialog.account.name}”？这会移除保存在此服务中的账户凭据，无法撤销，不会注销官方账户。</Notice></ConfirmDialog>}
       {dialog?.kind === 'reset' && <ConfirmDialog title="重置账户状态" label="确认重置" onClose={() => setDialog(null)} onConfirm={async () => { await runAction(dialog.account, { id: dialog.account.id, action: 'reset' }) }}><Notice tone="warn">仅重置“{dialog.account.name}”在此服务中的错误 / 冷却状态，不增加额度，也不能解除上游风控或限流。</Notice></ConfirmDialog>}
-      {dialog?.kind === 'test' && <TestDialog account={dialog.account} models={modelList(dialog.account)} onClose={() => setDialog(current => current?.kind === 'test' ? null : current)} onTest={model => runAction(dialog.account, { id: dialog.account.id, action: 'test', model })} />}
+      {dialog?.kind === 'test' && <TestDialog account={dialog.account} models={modelList(dialog.account)} onClose={() => setDialog(current => current?.kind === 'test' ? null : current)} onTest={async model => { await runAction(dialog.account, { id: dialog.account.id, action: 'test', model }) }} />}
       {dialog?.kind === 'login' && <LoginDialog provider={dialog.provider} accountId={dialog.accountId} onClose={() => setDialog(null)} onDone={refresh} />}
     </>
   )

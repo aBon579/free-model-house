@@ -222,11 +222,17 @@ func (a *Admin) handleCreditAction(w http.ResponseWriter, r *http.Request, m *cr
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "credits": credits})
 	case "claim":
 		results, err := m.Claim(ctx, body.ID, body.CampaignID)
+		kind, until := m.ClaimHold(body.ID)
+		hold := map[string]any{"kind": kind, "untilMs": until}
+		// ⚠️ 领取失败一律 200 + ok:false，不走 writeCreditError。
+		//   上游回的 401 说的是"**你那个账号的凭据**没了"，与管理台会话无关；
+		//   原样透传 HTTP 401 会让前端 dispatch('fmh:logout')，把管理员踢下线。
+		//   claimHold 同时回给页面：批量签到靠它做"同类错误连续两个号就整批停"。
 		if err != nil {
-			writeCreditError(w, err)
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "message": err.Error(), "results": results, "claimHold": hold})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "results": results})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "results": results, "claimHold": hold})
 	case "reset":
 		if err := m.Reset(body.ID); err != nil {
 			writeCreditError(w, err)

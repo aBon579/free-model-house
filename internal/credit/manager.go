@@ -32,6 +32,15 @@ type Account struct {
 	Credits       *Credits `json:"credits,omitempty"`
 	Error         string   `json:"error,omitempty"`
 	CooldownUntil int64    `json:"cooldownUntil,omitempty"`
+	// ClaimCooldownUntil / ClaimCooldownKind 只关**领取**这一件事。
+	//
+	// ⚠️ 它和上面的 CooldownUntil 必须是两套开关：那个是推理车道的闸门，
+	//   车道挑号时读它。领额度领挂了跟"这个号能不能转发对话"没有关系，
+	//   共用一个字段会变成"签到被限流 60 秒 → 这 60 秒对话换个号跑"。
+	//
+	// 负值 = 停到人工解除（凭据失效那一档），由重新登录 / 刷新凭据 / 重置状态清掉。
+	ClaimCooldownUntil int64  `json:"claimCooldownUntil,omitempty"`
+	ClaimCooldownKind  string `json:"claimCooldownKind,omitempty"`
 }
 
 type storedAccount struct {
@@ -625,6 +634,9 @@ func (m *Manager) refresh(ctx context.Context, a storedAccount) (storedAccount, 
 		v.Revision++
 		v.Error = ""
 		v.CooldownUntil = 0
+		// 凭据刷新成功 = "停到人工解除"那一档的前提没了；重新登录走 add()，
+		// 那里整条记录是新建的，天然干净。
+		v.ClaimCooldownUntil, v.ClaimCooldownKind = 0, ""
 		accountIdentity(v)
 	})
 	if err != nil {
@@ -686,6 +698,107 @@ func (m *Manager) Credits(ctx context.Context, id string) (Credits, error) {
 	return credits, err
 }
 
+// 领取失败的分档。秒数来自两处：侦察件里第三方实现的分类表
+// （tools/reference-trae-zcode/trae-credits.ts:classifyTraeCheckinError），以及 FMH
+// 自己在 TRAE 领取接口上实测过的业务码（1005 套餐上限、9074 签到人数过多）。
+const (
+	claimKindCredential = "credential" // 凭据已死：自动领停到人工重新登录 / 刷新凭据
+	claimKindPlan       = "plan"       // 套餐级上限：12 小时内再怎么点都是同一个判决
+	claimKindServer     = "server"     // 5xx、连不上、答非所问：10 分钟后照时刻表再试
+	claimKindRate       = "rate"       // 429 / 9074：60 秒
+	// claimHoldForever 在分类里表示"不带到期时间"；落盘用负数毫秒（claimHoldForeverMS），
+	// 不能直接取 claimHoldForever 的毫秒数 —— 那个哨兵只有 1 纳秒，换算下来是 0。
+	claimHoldForever   = time.Duration(-1)
+	claimHoldForeverMS = int64(-1)
+)
+
+// claimHold 是一次领取失败换算出来的暂停；kind 为空表示这次失败不该停掉自动领。
+type claimHold struct {
+	hold time.Duration
+	kind string
+}
+
+// severity 让一轮里并存的多个失败取最重的那个（12 小时盖过 60 秒）。
+func (h claimHold) severity() int {
+	switch h.kind {
+	case claimKindCredential:
+		return 4
+	case claimKindPlan:
+		return 3
+	case claimKindServer:
+		return 2
+	case claimKindRate:
+		return 1
+	}
+	return 0
+}
+
+// classifyClaimError 把领取路径上的错误换成分档。
+//
+// ⚠️ 认不出来的一律**不罚号**："这个渠道没有该领取项""当前未开放签到"、凭据缺字段
+//
+//	都是请求本身的问题，换一个号拿到的判决一样；罚下去只会把整池账号停成哑巴。
+//	所以这里的默认分支是返回空，不是返回一个保守的 10 分钟。
+func classifyClaimError(err error) claimHold {
+	var api *APIError
+	if errors.As(err, &api) {
+		switch {
+		case api.Status == http.StatusUnauthorized || api.Code == "token_expired":
+			return claimHold{claimHoldForever, claimKindCredential}
+		case api.Code == "1005":
+			return claimHold{12 * time.Hour, claimKindPlan}
+		case api.Status == http.StatusTooManyRequests || api.Code == "9074":
+			return claimHold{time.Minute, claimKindRate}
+		case api.Status >= http.StatusInternalServerError:
+			return claimHold{10 * time.Minute, claimKindServer}
+		}
+		return claimHold{}
+	}
+	if errors.Is(err, ErrUpstreamTransport) || errors.Is(err, ErrUpstreamBadBody) || errors.Is(err, context.DeadlineExceeded) {
+		return claimHold{10 * time.Minute, claimKindServer}
+	}
+	return claimHold{}
+}
+
+// claimCooling 报告这个号的领取暂停是否还生效；负值是"停到人工解除"。
+func claimCooling(untilMS, nowMS int64) bool {
+	return untilMS < 0 || untilMS > nowMS
+}
+
+// setClaimHold 落盘这一轮领取的分档。hold.kind 为空表示上游这一轮正常应答过，
+// 旧档位就此清除 —— 包括"停到人工解除"那一档，因为账号已经能正常领到东西了。
+func (m *Manager) setClaimHold(a storedAccount, hold claimHold) {
+	until, kind := int64(0), ""
+	switch {
+	case hold.kind == claimKindCredential:
+		until, kind = claimHoldForeverMS, hold.kind
+	case hold.kind != "":
+		until, kind = time.Now().Add(hold.hold).UnixMilli(), hold.kind
+	}
+	_ = m.updateAccount(a, func(v *storedAccount) {
+		v.ClaimCooldownUntil, v.ClaimCooldownKind = until, kind
+	})
+}
+
+// noteClaimFailure 只在错误够得上分档时才动记录。
+//
+// 预读（Credits/凭据）失败、本地校验没过的失败都从这里走：够不上分档时**保留旧档**，
+// 不然一次"账号没有 accessToken"的本地报错会把还在生效的 12 小时上限抹掉。
+func (m *Manager) noteClaimFailure(a storedAccount, err error) {
+	if hold := classifyClaimError(err); hold.kind != "" {
+		m.setClaimHold(a, hold)
+	}
+}
+
+// ClaimHold 回显账号当前的领取分档，供批量签到判断要不要整批早停。
+func (m *Manager) ClaimHold(id string) (kind string, untilMS int64) {
+	a, err := m.account(id)
+	if err != nil {
+		return "", 0
+	}
+	return a.ClaimCooldownKind, a.ClaimCooldownUntil
+}
+
 func (m *Manager) Claim(ctx context.Context, id, campaignID string) ([]ClaimResult, error) {
 	unlock := m.lock(id)
 	defer unlock()
@@ -695,14 +808,17 @@ func (m *Manager) Claim(ctx context.Context, id, campaignID string) ([]ClaimResu
 	}
 	a, err = m.activeCredential(ctx, a)
 	if err != nil {
+		m.noteClaimFailure(a, err)
 		return nil, err
 	}
 	adapter := m.adapters[a.Provider]
 	credits, err := adapter.Credits(ctx, a.Credential)
 	if err != nil {
+		m.noteClaimFailure(a, err)
 		return nil, err
 	}
 	results := []ClaimResult{}
+	worst := claimHold{}
 	for _, campaign := range credits.Campaigns {
 		if campaignID != "" && campaign.ID != campaignID {
 			continue
@@ -717,12 +833,16 @@ func (m *Manager) Claim(ctx context.Context, id, campaignID string) ([]ClaimResu
 		res, claimErr := adapter.Claim(ctx, a.Credential, campaign.ID)
 		if claimErr != nil {
 			res = ClaimResult{ID: campaign.ID, Name: campaign.Name, Message: claimErr.Error()}
+			if h := classifyClaimError(claimErr); h.severity() > worst.severity() {
+				worst = h
+			}
 		}
 		results = append(results, res)
 	}
 	if len(results) == 0 {
 		results = append(results, ClaimResult{Message: "当前没有可领取的活动，不等同于今天已领取"})
 	}
+	m.setClaimHold(a, worst)
 	fresh, ferr := adapter.Credits(ctx, a.Credential)
 	if ferr == nil {
 		_ = m.updateAccount(a, func(v *storedAccount) { v.Credits = &fresh; v.Error = "" })
@@ -730,12 +850,17 @@ func (m *Manager) Claim(ctx context.Context, id, campaignID string) ([]ClaimResu
 	return results, nil
 }
 
+// Reset 清掉两套开关：推理车道的冷却和领取的分档暂停。
+// 页面上那个「重置状态」就是人工解除"停到重新登录"那一档的入口。
 func (m *Manager) Reset(id string) error {
 	a, err := m.account(id)
 	if err != nil {
 		return err
 	}
-	return m.updateAccount(a, func(v *storedAccount) { v.CooldownUntil = 0; v.Error = "" })
+	return m.updateAccount(a, func(v *storedAccount) {
+		v.CooldownUntil, v.Error = 0, ""
+		v.ClaimCooldownUntil, v.ClaimCooldownKind = 0, ""
+	})
 }
 func (m *Manager) RecordFailure(id string, err error, delay time.Duration) {
 	a, e := m.account(id)
@@ -864,6 +989,11 @@ func (m *Manager) autoClaim(ctx context.Context) {
 			return
 		}
 		if !autoClaimDue(a.AutoClaimAt, s.LastAutoClaim[a.ID], day, minuteNow) {
+			continue
+		}
+		// 上游说"太快了 / 凭据没了"，就没必要每天到点再撞一次。手动签到不看这个格子，
+		// 用户随时可以自己试；这里只挡无人值守的那条路。
+		if claimCooling(a.ClaimCooldownUntil, now.UnixMilli()) {
 			continue
 		}
 		// 一天一次自动尝试；失败留给手动重试，避免反复触发领取风控。
