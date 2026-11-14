@@ -483,7 +483,7 @@ func TestTraePrepareRejectsBrokenToolRelationshipsAndCapabilities(t *testing.T) 
 }
 
 func TestTraeCreditsPartialAndUnknownAmounts(t *testing.T) {
-	for _, mode := range []string{"missing-usage", "balance-failure", "status-failure", "both-fail"} {
+	for _, mode := range []string{"mixed-packs", "balance-failure", "status-failure", "both-fail"} {
 		t.Run(mode, func(t *testing.T) {
 			calls := 0
 			var device, market, session, request string
@@ -512,7 +512,7 @@ func TestTraeCreditsPartialAndUnknownAmounts(t *testing.T) {
 					if mode == "balance-failure" || mode == "both-fail" {
 						return 200, `{"code":"1005","message":"private-secret"}`
 					}
-					return 200, `{"user_entitlement_pack_list":[{"entitlement_base_info":{"display_desc":"签到奖励","quota":{"credits_limit":150}},"usage":{"credits_amount":25},"expire_time":1900000000},{"entitlement_base_info":{"display_desc":"未知用量","quota":{"credits_limit":500}}}]}`
+					return 200, `{"user_entitlement_pack_list":[{"entitlement_base_info":{"display_desc":"签到奖励","quota":{"credits_limit":150}},"usage":{"credits_amount":25},"expire_time":1900000000},{"entitlement_base_info":{"display_desc":"未消耗","quota":{"credits_limit":500}}},{"entitlement_base_info":{"display_desc":"免费"}}]}`
 				}
 				if r.URL.Path != traeStatusPath || len(b) != 0 {
 					t.Fatal("wrong checkin status body")
@@ -541,11 +541,19 @@ func TestTraeCreditsPartialAndUnknownAmounts(t *testing.T) {
 				}
 				return
 			}
-			if len(result.Balances) != 2 || result.Balances[0].Remaining == nil || *result.Balances[0].Remaining != 125 || result.Balances[0].ExpiresAt != 1900000000000 {
+			if len(result.Balances) != 3 || result.Balances[0].Remaining == nil || *result.Balances[0].Remaining != 125 || result.Balances[0].ExpiresAt != 1900000000000 {
 				t.Fatal("wrong known balance")
 			}
-			if result.Balances[1].Total == nil || result.Balances[1].Used != nil || result.Balances[1].Remaining != nil {
-				t.Fatal("unknown usage treated as zero")
+			// 用量缺席 = 这个包还没消耗：500 的包就该剩 500，官方余额读数也是这么聚合的
+			if result.Balances[1].Used == nil || *result.Balances[1].Used != 0 || result.Balances[1].Remaining == nil || *result.Balances[1].Remaining != 500 {
+				t.Fatal("absent usage must mean zero consumed, not unknown")
+			}
+			// 总量缺席才是真未知：没有基数就不许减出剩余
+			if result.Balances[2].Total != nil || result.Balances[2].Remaining != nil {
+				t.Fatal("missing limit fabricated as a number")
+			}
+			if !strings.Contains(result.Warning, "1 个额度包总量未知") {
+				t.Fatal("unknown-total pack not reported")
 			}
 			if mode == "status-failure" && len(result.Campaigns) != 0 {
 				t.Fatal("failed campaign status invented")

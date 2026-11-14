@@ -730,6 +730,9 @@ func (a *traeAdapter) Credits(ctx context.Context, c Credential) (Credits, error
 		if !ok {
 			balanceErr = errors.New("TRAE 额度包字段缺失")
 		} else {
+			// 一句警告按包数计数，不逐包 append：十几个包会把这条 Notice 撑成一堵
+			// 重复文字的墙，真正该看的"有几个包算不出来"反而被埋掉。
+			unknownTotal := 0
 			for _, item := range packs {
 				e, ok := item.(map[string]any)
 				if !ok {
@@ -737,7 +740,17 @@ func (a *traeAdapter) Credits(ctx context.Context, c Credential) (Credits, error
 					continue
 				}
 				base := Object(e["entitlement_base_info"])
-				b := Balance{Name: traeString(base, "display_desc"), Unit: "credits", Total: traeNumber(Object(base["quota"])["credits_limit"]), Used: traeNumber(Object(e["usage"])["credits_amount"]), ExpiresAt: traeTime(e["expire_time"])}
+				// ⚠️ `usage` 缺席是"这个包还没被消耗"，不是"用量未知"。依据是官方余额
+				//    读数能对上：账号显示 1,054 = 10 个无 usage 的签到包 ×100
+				//    + 54.3092（唯一带 usage 的签到包 100−45.6908）+ 0 + 0
+				//    （新用户福利、每月登录赠送已用满）。当未知处理只会显示 54.3092，
+				//    比官方少整整 1000 —— 那是把已知事实报成了未知。
+				used := 0.0
+				if v := traeNumber(Object(e["usage"])["credits_amount"]); v != nil {
+					used = *v
+				}
+				total := traeNumber(Object(base["quota"])["credits_limit"])
+				b := Balance{Name: traeString(base, "display_desc"), Unit: "credits", Total: total, Used: &used, ExpiresAt: traeTime(e["expire_time"])}
 				if b.Name == "" {
 					b.Name = traeString(e, "display_desc")
 					if b.Name == "" {
@@ -747,13 +760,17 @@ func (a *traeAdapter) Credits(ctx context.Context, c Credential) (Credits, error
 				if b.ExpiresAt == 0 {
 					b.ExpiresAt = traeTime(Object(e["base_info"])["end_time"])
 				}
-				if b.Total != nil && b.Used != nil {
-					remain := *b.Total - *b.Used
+				if total != nil {
+					remain := *total - used
 					b.Remaining = &remain
 				} else {
-					warnings = append(warnings, "部分额度包用量未知，未按零计算")
+					// 拿不到总量才是真未知：没有基数，减不出剩余，也不许编。
+					unknownTotal++
 				}
 				out.Balances = append(out.Balances, b)
+			}
+			if unknownTotal > 0 {
+				warnings = append(warnings, strconv.Itoa(unknownTotal)+" 个额度包总量未知，未计入剩余")
 			}
 		}
 	}
