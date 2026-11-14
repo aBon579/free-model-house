@@ -29,7 +29,7 @@ export function formatCost(usd: number): string {
  *   zen（免密）—— 不要凭据，高峰期可能被限流。
  *   Kilo —— 也不要凭据，标准 OpenAI 兼容。
  *   OpenRouter —— 用你自己的 Key，额度绑定账户、**按天算**。
- *   credit —— Credit 页登录的账号（Qoder / TRAE / ZCode…），
+ *   credit —— Credit 页登录的账号（Qoder / TRAE…），
  *     烧的是那个账号自己的额度，所以**不参与自动探测**。
  */
 export function LaneBadge({ lane }: { lane: LaneID; full?: boolean }) {

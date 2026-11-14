@@ -38,7 +38,7 @@ const LaneID = "credit"
 type Backend interface {
 	Snapshot() credit.Snapshot
 	Candidates(provider, model, accountID string) []credit.Account
-	Prepare(ctx context.Context, id string, in credit.Inference, captcha string) (credit.Prepared, error)
+	Prepare(ctx context.Context, id string, in credit.Inference) (credit.Prepared, error)
 	RecordSuccess(id string)
 	RecordFailure(id string, err error, delay time.Duration)
 	HTTPClient() *http.Client
@@ -167,15 +167,10 @@ func modelInfo(providerName, provider string, m credit.Model) lane.ModelInfo {
 	if providerName == "" {
 		providerName = provider
 	}
-	wire := "chat"
-	if provider == "zcode" {
-		// ZCode 的上游就说 Anthropic 那套帧形，直通、不翻译。
-		wire = "messages"
-	}
 	return lane.ModelInfo{
 		ID:   FormatModelID(provider, m.ID),
 		Lane: LaneID,
-		Wire: wire,
+		Wire: "chat",
 		Name: providerName + " · " + name,
 		// ⚠️ `Free` 回到它的字面意思：**这一次推理不扣额度**。
 		//   以前整池 credit 一律给 true，于是 0× 的 Qwen3.8-Flash 和
@@ -260,8 +255,7 @@ func (l *Lane) Do(ctx context.Context, turn *lane.Turn, emit func(lane.Chunk)) (
 		return nil, lane.FinishError, l.noCandidate(provider, model)
 	}
 
-	// ⚠️ 三家上游的请求体**都吃 OpenAI chat 形状**（ZCode 在自己的
-	//   Prepare 里把它转成 Anthropic）。所以这里统一用 ChatWireTurn，
+	// ⚠️ 两家上游的请求体**都吃 OpenAI chat 形状**。所以这里统一用 ChatWireTurn，
 	//   不能按 wire 名去拼两套消息 —— 那样只会多一套会写错的地方。
 	messages, tools := lane.ChatWireTurn(turn)
 	in := credit.Inference{
@@ -280,7 +274,7 @@ func (l *Lane) Do(ctx context.Context, turn *lane.Turn, emit func(lane.Chunk)) (
 			return nil, lane.FinishError, &lane.Error{Code: lane.CodeAborted, Message: "cancelled"}
 		}
 		// Prepare 只做本地签名/加密（Qoder 那边要跑 wasm），不碰网络。
-		prepared, err := l.backend.Prepare(ctx, a.ID, in, "")
+		prepared, err := l.backend.Prepare(ctx, a.ID, in)
 		if err != nil {
 			lastErr = localError(err)
 			l.backend.RecordFailure(a.ID, err, coolLocal)
@@ -482,13 +476,6 @@ func cooldownOf(uerr *lane.Error) time.Duration {
 		return coolAuth
 	case lane.CodeClient, lane.CodeUnsupportedInput:
 		// 请求本身不合法 —— 换哪个账号都一样，罚账号只会让整池空掉。
-		//
-		// ⚠️ 例外：上游明确给了退避时间的"客户端错误"要冷却。
-		//   ZCode 的 3012 就是这个形状：它不是说你请求写错了，
-		//   是说"这个账号刚被风控罚了，你再打就更重"。
-		if uerr.RetryAfterSec > 0 {
-			return time.Duration(uerr.RetryAfterSec) * time.Second
-		}
 		return 0
 	case lane.CodeAborted:
 		return 0
@@ -518,7 +505,7 @@ func rotatable(uerr *lane.Error) bool {
 //
 // ⚠️ Prepare 不碰网络，但它会**带着上游的判决**回来：
 //
-//	ZCode 的适配器直接返回 `*credit.APIError{Status, Code, Message}`，
+//	上游的判决本来就包在 `*credit.APIError{Status, Code, Message}` 里回来，
 //	那是上游给过的分类信息，丢掉它、一律说成"请求有问题"，
 //	路由器就会放弃本该换账号/换车道的故障转移。
 //	所以能按状态码分类的**交给 ClassifyFailure**，判不出来的算**我们这侧**的故障。

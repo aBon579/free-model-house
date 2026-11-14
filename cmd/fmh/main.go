@@ -201,7 +201,7 @@ func run(addr, dataDir string, logger *log.Logger) error {
 		}
 	}
 
-	// ⚠️ **Credit 车道**（用户自己的 Qoder / TRAE / ZCode 账号）。
+	// ⚠️ **Credit 车道**（用户自己的 Qoder / TRAE 账号）。
 	//
 	//   凭据跟其它上游 Key 一样经 vault 密封后落库，页面只显示指纹。
 	//   建不起来只让 Credit 页报「未启用」，不该拖垮整个启动流程。
@@ -214,6 +214,13 @@ func run(addr, dataDir string, logger *log.Logger) error {
 		logger.Printf("Credit 服务初始化失败（管理台 Credit 页不可用）: %v", err)
 	} else {
 		creditMgr = m
+
+		// ⚠️ 提供方**已经没有适配器**的账号在装载时就被清掉了 —— 留着它们，
+		//   第一次用到就是 nil 接口 panic。但清掉等于删掉用户密封保存的凭据，
+		//   所以要把渠道和名称写进启动日志：静默消失的账号没人能发现。
+		if obsolete := m.ObsoleteAccounts(); len(obsolete) > 0 {
+			logger.Printf("⚠️ 已清除 %d 个不再受支持的 Credit 账号（其凭据已从本地存储删除，需要时重新登录即可）：%v", len(obsolete), obsolete)
+		}
 		creditLane := creditlane.New(creditMgr)
 		registry.Register(creditLane)
 

@@ -60,8 +60,6 @@ type Admin struct {
 	loghub *loghub.Hub
 	// credit 是 Credit 页的账号管理器（可为 nil = 未启用）。
 	credit *credit.Manager
-	// creditCaptcha 暂存浏览器刚产出的官方验证码参数（随 credit 一起装）。
-	creditCaptcha *creditCaptchaStage
 }
 
 // SetEgress 装上出口探测器。

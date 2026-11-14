@@ -1,16 +1,15 @@
 import { useEffect, useId, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { ArrowDown, ArrowUp, Download, ExternalLink, Gift, KeyRound, Pencil, RefreshCw, ShieldCheck, Trash2, Upload, Wallet, X } from 'lucide-react'
+import { ArrowDown, ArrowUp, Download, ExternalLink, Gift, KeyRound, Pencil, RefreshCw, Trash2, Upload, Wallet, X } from 'lucide-react'
 import { PageTitle } from '../components/Shell'
 import { Badge, Button, Card, CardBody, CardHeader, Empty, ErrorNote, Field, Input, Loading, Notice, Select, Spinner, Stat, Switch, cn } from '../components/ui'
 import { useToast } from '../components/toast'
-import { creditApi, CreditError, useCredit, useCreditCaptchaRequests, type Account, type AccountAction, type AccountUpdate, type ActionResult, type CaptchaConfig, type CreditDate, type Credits, type ImportAccount, type Login, type Model, type Provider, type ProviderId } from '../api/credit'
+import { creditApi, useCredit, type Account, type AccountAction, type AccountUpdate, type ActionResult, type CreditDate, type Credits, type ImportAccount, type Login, type Model, type Provider, type ProviderId } from '../api/credit'
 
 const channels: { id: ProviderId; name: string; description: string }[] = [
   { id: 'qoder', name: 'Qoder', description: '国际版账户与资源包' },
   { id: 'qodercn', name: 'Qoder 中国版', description: '中国版账户与每日领取' },
   { id: 'trae', name: 'TRAE', description: '浏览器授权 · 支持远端 NAS' },
-  { id: 'zcode', name: 'ZCode', description: '活动领取与浏览器补验' },
 ]
 
 function message(error: unknown) {
@@ -173,12 +172,10 @@ function AccountSettings({ account, models, onClose, onSave }: { account: Accoun
   const [disabled, setDisabled] = useState(account.disabledModels)
   const [effort, setEffort] = useState(account.effort)
   const [maxMode, setMaxMode] = useState(account.maxMode)
-  const [officialIdentity, setOfficialIdentity] = useState(!!account.officialIdentity)
   const op = useOperation()
   const efforts = [...new Set([account.effort, ...models.flatMap(m => m.efforts ?? [])].filter(Boolean))]
   const missing = disabled.filter(id => !models.some(m => m.id === id))
   const supportsMax = models.some(m => m.maxMode)
-  const isZcode = account.provider === 'zcode'
   return (
     <Modal title="账户与模型设置" onClose={onClose} busy={op.busy}>
       <Field label="账户名称"><Input value={name} aria-label="重命名账户" onChange={e => setName(e.target.value)} maxLength={120} disabled={op.busy} /></Field>
@@ -194,12 +191,8 @@ function AccountSettings({ account, models, onClose, onSave }: { account: Accoun
         <Field label="推理强度 effort" hint="按模型支持的档位生效。"><Select className="w-full" value={effort} aria-label="推理强度 effort" disabled={op.busy} onChange={e => setEffort(e.target.value)}><option value="">默认</option>{efforts.map(value => <option key={value} value={value}>{value}</option>)}</Select></Field>
         <Field label="Max Mode" hint={supportsMax ? '可能提高额度消耗，仅支持的模型生效。' : '当前未发现支持此模式的模型。'}><Switch checked={maxMode} onChange={setMaxMode} label="启用 Max Mode" disabled={op.busy || (!supportsMax && !maxMode)} /></Field>
       </div>
-      {isZcode && <Field label="官方客户端身份" hint="ZCode 通道只放行官方客户端形态的请求；开启后本账号的推理请求会带上官方的 system 身份块。默认关闭。">
-        <Switch checked={officialIdentity} onChange={setOfficialIdentity} label="按官方客户端形态发送" disabled={op.busy} />
-        {officialIdentity && <Notice tone="bad">这是把请求伪装成官方客户端，不是修请求格式。上游对拒绝有阶梯处罚：一次 30 分钟、24 小时内第 3 次起 24 小时、累计 5 次停用账号；与服务商条款的冲突由开启它的你承担。开启后仍然报 3012，说明模板已与上游当前策略脱钩，请立刻关掉，不要拿账号试错。FMH 仍会在身份块之后保留「这是第三方客户端」的自述，对最终用户不做隐瞒。</Notice>}
-      </Field>}
       {op.error && <ErrorNote>{op.error}</ErrorNote>}
-      <div className="flex justify-end gap-2"><Button disabled={op.busy} onClick={onClose}>取消</Button><Button variant="primary" disabled={op.busy || !name.trim()} onClick={() => void op.run(async () => { await onSave({ id: account.id, name: name.trim(), disabledModels: disabled, effort, maxMode, ...(isZcode ? { officialIdentity } : {}) }); onClose() })}>{op.busy && <Spinner />}保存设置</Button></div>
+      <div className="flex justify-end gap-2"><Button disabled={op.busy} onClick={onClose}>取消</Button><Button variant="primary" disabled={op.busy || !name.trim()} onClick={() => void op.run(async () => { await onSave({ id: account.id, name: name.trim(), disabledModels: disabled, effort, maxMode }); onClose() })}>{op.busy && <Spinner />}保存设置</Button></div>
     </Modal>
   )
 }
@@ -342,160 +335,6 @@ function LoginDialog({ provider, accountId, onClose, onDone }: { provider: Provi
   )
 }
 
-interface CaptchaInstance { destroy?: () => void }
-interface CaptchaOptions {
-  SceneId: string
-  prefix: string
-  mode: 'popup'
-  element: string
-  button: string
-  getInstance: (instance: CaptchaInstance) => void
-  captchaVerifyCallback: (param: string) => Promise<{ captchaResult: boolean; bizResult: boolean }>
-  success: (param?: unknown) => void
-  fail: () => void
-  onError: () => void
-}
-
-type CaptchaWindow = Window & {
-  AliyunCaptchaConfig?: { region: string; prefix: string }
-  initAliyunCaptcha?: (options: CaptchaOptions) => void
-}
-
-function captchaParam(input: string) {
-  let param = input.trim()
-  if (param.startsWith('{') || param.startsWith('"')) {
-    const parsed = parseJSON(param)
-    param = typeof parsed === 'string' ? parsed : isObject(parsed) && typeof parsed.captchaVerifyParam === 'string' ? parsed.captchaVerifyParam : isObject(parsed) && typeof parsed.CaptchaVerifyParam === 'string' ? parsed.CaptchaVerifyParam : ''
-  }
-  if (param.length < 200) throw new Error('请提供官方 SDK 生成的完整 CaptchaVerifyParam，不接受短值或自行拼接的 JSON。')
-  let payload: unknown
-  try { payload = JSON.parse(atob(param)) } catch { throw new Error('CaptchaVerifyParam 必须是官方返回的有效 Base64 JSON 参数。') }
-  if (!isObject(payload) || typeof payload.certifyId !== 'string' || !payload.certifyId || typeof payload.securityToken !== 'string' || payload.securityToken.length < 50) throw new Error('参数缺少有效 certifyId / securityToken；这不代表已通过验证，请重新完成官方验证码。')
-  return param
-}
-
-function CaptchaDialog({ accountId, name, requestId, onClose, onSubmitted }: { accountId: string; name: string; requestId?: string; onClose: () => void; onSubmitted: () => Promise<void> }) {
-  const [config, setConfig] = useState<CaptchaConfig | null>(null)
-  const [configError, setConfigError] = useState('')
-  const [sdkState, setSDKState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle')
-  const [sdkError, setSDKError] = useState('')
-  const [manual, setManual] = useState('')
-  const [submitError, setSubmitError] = useState('')
-  const [submitting, setSubmitting] = useState(false)
-  const [submitted, setSubmitted] = useState(false)
-  const [configVersion, setConfigVersion] = useState(0)
-  const instance = useRef<CaptchaInstance | null>(null)
-  const disposeSDK = useRef<(() => void) | null>(null)
-  const submitLock = useRef(false)
-  const consumed = useRef(false)
-  const alive = useRef(true)
-  const uid = useId().replace(/[^a-zA-Z0-9_-]/g, '')
-  const hostId = `credit-captcha-host-${uid}`
-  const buttonId = `credit-captcha-button-${uid}`
-  useEffect(() => {
-    alive.current = true
-    return () => {
-      alive.current = false
-      disposeSDK.current?.()
-      instance.current?.destroy?.()
-    }
-  }, [])
-  useEffect(() => {
-    const controller = new AbortController()
-    setConfigError('')
-    void creditApi.captchaConfig(accountId, controller.signal).then(setConfig).catch(e => { if (!controller.signal.aborted) setConfigError(message(e)) })
-    return () => controller.abort()
-  }, [accountId, configVersion])
-  async function submit(raw: string) {
-    if (!alive.current || submitLock.current || consumed.current) return false
-    submitLock.current = true
-    setSubmitting(true)
-    setSubmitError('')
-    try {
-      const param = captchaParam(raw)
-      setManual('')
-      consumed.current = true
-      const result = await creditApi.captcha({ id: accountId, requestId, captchaVerifyParam: param })
-      if (result?.ok === false) throw new Error('后台未接受验证码，请重新完成官方验证。')
-      if (!alive.current) return false
-      setSubmitted(true)
-      return true
-    } catch (e) {
-      if (alive.current) setSubmitError(`${message(e)}${consumed.current ? ' 参数已尝试提交，请关闭后重新验证，勿复用该 token。' : ''}`)
-      return false
-    } finally {
-      submitLock.current = false
-      if (alive.current) setSubmitting(false)
-    }
-  }
-  function loadSDK() {
-    if (!config || sdkState === 'loading' || sdkState === 'ready') return
-    const win = window as CaptchaWindow
-    let url: URL
-    try {
-      url = new URL(config.sdkUrl)
-      if (url.protocol !== 'https:' || !['o.alicdn.com', 'g.alicdn.com'].includes(url.hostname) || url.username || url.password) throw new Error()
-    } catch { setSDKError('后台 SDK 地址不是受支持的阿里云官方 HTTPS 地址，请使用有效参数手动提交。'); setSDKState('error'); return }
-    if (!config.sceneId || !config.prefix || !config.region) { setSDKError('后台缺少阿里云验证码场景配置。'); setSDKState('error'); return }
-    setSDKState('loading')
-    setSDKError('')
-    win.AliyunCaptchaConfig = { region: config.region, prefix: config.prefix }
-    const initialize = () => {
-      if (!alive.current) return
-      try {
-        if (!win.initAliyunCaptcha) throw new Error('官方 SDK 未提供 initAliyunCaptcha')
-        win.initAliyunCaptcha({
-          SceneId: config.sceneId,
-          prefix: config.prefix,
-          mode: 'popup',
-          element: `#${hostId}`,
-          button: `#${buttonId}`,
-          getInstance: value => { if (alive.current) instance.current = value; else value.destroy?.() },
-          captchaVerifyCallback: async param => { const accepted = await submit(param); return { captchaResult: accepted, bizResult: accepted } },
-          success: param => { if (typeof param === 'string' && !consumed.current) void submit(param) },
-          fail: () => { if (alive.current) setSDKError('官方验证码未通过，请重新验证；没有提交任何伪造参数。') },
-          onError: () => { if (alive.current) setSDKError('官方 SDK 验证失败，可能受网络或当前站点域名限制；请使用有效参数手动提交。') },
-        })
-        setSDKState('ready')
-      } catch (e) { setSDKState('error'); setSDKError(message(e)) }
-    }
-    if (win.initAliyunCaptcha) { initialize(); return }
-    disposeSDK.current?.()
-    const script = document.createElement('script')
-    script.src = url.href
-    script.async = true
-    const timer = window.setTimeout(() => {
-      script.onload = null
-      script.remove()
-      if (alive.current) { setSDKState('error'); setSDKError('官方 SDK 加载超时，可检查网络后重试，或手动提交有效参数。') }
-    }, 15_000)
-    disposeSDK.current = () => { clearTimeout(timer); script.onload = null; script.onerror = null; script.remove() }
-    script.onload = () => { clearTimeout(timer); initialize() }
-    script.onerror = () => { clearTimeout(timer); script.remove(); if (alive.current) { setSDKState('error'); setSDKError('无法加载官方 SDK，请检查网络，或手动输入有效参数。') } }
-    document.body.appendChild(script)
-  }
-  const finish = useOperation()
-  return (
-    <Modal title={`ZCode 官方验证码 · ${name}`} onClose={onClose} busy={submitting || finish.busy}>
-      <Notice>请在你当前的浏览器中完成真正的阿里云验证码。每个 token 仅供当前账户的一次请求消费，不缓存、不复用、不自动生成或绕过验证。</Notice>
-      {requestId && <div className="text-[12px] text-[var(--ink-3)]">这是后台等待中的补验请求；提交后由后台继续处理，不会再发起一次模型调用。</div>}
-      {configError && <ErrorNote>{configError}<Button size="sm" className="ml-2" onClick={() => setConfigVersion(v => v + 1)}>重试配置</Button></ErrorNote>}
-      {!config && !configError && <Loading label="读取官方验证码场景…" />}
-      {config && <div className="space-y-3">
-        <div className="text-[12px] text-[var(--ink-3)]">官方区域 {config.region} · 场景 {config.sceneId}</div>
-        <div className="flex flex-wrap gap-2"><Button disabled={sdkState === 'loading' || sdkState === 'ready' || submitting || submitted || consumed.current} onClick={loadSDK}>{sdkState === 'loading' ? <Spinner /> : <ShieldCheck size={14} />}{sdkState === 'ready' ? '官方 SDK 已就绪' : '加载官方验证码'}</Button><Button id={buttonId} variant="primary" disabled={sdkState !== 'ready' || submitting || submitted || consumed.current}>开始官方验证</Button></div>
-        <div id={hostId} />
-      </div>}
-      {sdkError && <ErrorNote>{sdkError}</ErrorNote>}
-      {!submitted && <Field label="备用：有效 CaptchaVerifyParam（输入已遮蔽）" hint={'仅接受官方 SDK 真实产出的参数，或 {"captchaVerifyParam":"…"}。格式检查不代表验证成功，上游仍会校验。'}><SecretTextarea label="CaptchaVerifyParam" value={manual} onChange={setManual} disabled={submitting || consumed.current} /><Button className="mt-2" disabled={!manual.trim() || submitting || consumed.current} onClick={() => void submit(manual)}>{submitting && <Spinner />}提交真实验证码参数</Button></Field>}
-      {submitError && <ErrorNote>{submitError}</ErrorNote>}
-      {submitted && <Notice tone="ok">参数已提交后台，尚不等于领取或推理成功。{requestId ? '后台将继续等待中的请求。' : '点击下方继续，仅重试原操作一次；结果会单独显示。'}</Notice>}
-      {finish.error && <ErrorNote>{finish.error}</ErrorNote>}
-      <div className="flex justify-end gap-2"><Button disabled={submitting || finish.busy} onClick={onClose}>关闭</Button>{submitted && <Button variant="primary" disabled={finish.busy} onClick={() => void finish.run(async () => { await onSubmitted(); onClose() })}>{finish.busy && <Spinner />}{requestId ? '完成补验' : '继续原操作（仅一次）'}</Button>}</div>
-    </Modal>
-  )
-}
-
 function CreditBalances({ credits, staleError, busy, onClaim }: { credits?: Credits; staleError?: string; busy: boolean; onClaim: (campaignId: string) => void }) {
   return <div className="space-y-3">
     {staleError && <Notice tone="warn">余额获取失败，当前余额未知；下方如有数据，仅为上次成功快照，不代表当前可用额度。</Notice>}
@@ -508,9 +347,8 @@ function CreditBalances({ credits, staleError, busy, onClaim }: { credits?: Cred
   </div>
 }
 
-interface Outcome { state: 'running' | 'ok' | 'error' | 'captcha'; text: string; result?: ActionResult }
-interface PendingAction { accountId: string; action: AccountAction }
-type Dialog = { kind: 'import' | 'export' } | { kind: 'edit' | 'delete' | 'reset' | 'test'; account: Account } | { kind: 'login'; provider: Provider; accountId?: string } | { kind: 'captcha'; accountId: string; name: string; requestId?: string } | null
+interface Outcome { state: 'running' | 'ok' | 'error'; text: string; result?: ActionResult }
+type Dialog = { kind: 'import' | 'export' } | { kind: 'edit' | 'delete' | 'reset' | 'test'; account: Account } | { kind: 'login'; provider: Provider; accountId?: string } | null
 
 function TestDialog({ account, models, onClose, onTest }: { account: Account; models: Model[]; onClose: () => void; onTest: (model: string) => Promise<void> }) {
   const available = models.filter(model => !account.disabledModels.includes(model.id))
@@ -522,7 +360,6 @@ function TestDialog({ account, models, onClose, onTest }: { account: Account; mo
 
 export function Credit() {
   const query = useCredit()
-  const captchaRequests = useCreditCaptchaRequests()
   const qc = useQueryClient()
   const toast = useToast()
   const [providerId, setProviderId] = useState<ProviderId>('qoder')
@@ -531,8 +368,6 @@ export function Credit() {
   const locks = useRef(new Set<string>())
   const [outcomes, setOutcomes] = useState<Record<string, Outcome>>({})
   const [creditErrors, setCreditErrors] = useState<Record<string, string>>({})
-  const [pending, setPending] = useState<PendingAction[]>([])
-  const pendingRef = useRef<PendingAction[]>([])
   const [batch, setBatch] = useState(false)
   const batchLock = useRef(false)
   const mounted = useRef(true)
@@ -542,7 +377,6 @@ export function Credit() {
   const provider = data?.providers.find(p => p.id === providerId)
   const channel = channels.find(c => c.id === providerId)!
   const visible = accounts.filter(account => account.provider === providerId)
-  const requests = (captchaRequests.data?.requests ?? []).filter(request => !expired(request.expiresAt))
   const [, tick] = useState(0)
   useEffect(() => {
     mounted.current = true
@@ -551,7 +385,6 @@ export function Credit() {
   }, [])
   function refresh() {
     void qc.invalidateQueries({ queryKey: ['credit'] })
-    void qc.invalidateQueries({ queryKey: ['credit-captcha-requests'] })
     void qc.invalidateQueries({ queryKey: ['models'] })
     void qc.invalidateQueries({ queryKey: ['status'] })
   }
@@ -568,17 +401,6 @@ export function Credit() {
     locks.current.delete(id)
     if (mounted.current) setBusyIds(new Set(locks.current))
   }
-  function removePending(id: string) {
-    pendingRef.current = pendingRef.current.filter(item => item.accountId !== id)
-    setPending(pendingRef.current)
-  }
-  function queue(account: Account, action: AccountAction) {
-    if (!pendingRef.current.some(item => item.accountId === account.id)) {
-      pendingRef.current = [...pendingRef.current, { accountId: account.id, action }]
-      setPending(pendingRef.current)
-    }
-    setOutcomes(values => ({ ...values, [account.id]: { state: 'captcha', text: '等待用户完成官方验证码；不会阻塞其他账户。' } }))
-  }
   async function update(body: AccountUpdate) {
     if (!lock(body.id)) throw new Error('此账户有操作进行中，请稍后重试。')
     try {
@@ -588,7 +410,7 @@ export function Credit() {
       toast.ok('账户设置已更新')
     } finally { unlock(body.id) }
   }
-  async function runAction(account: Account, action: AccountAction, options: { retry?: boolean; quiet?: boolean; openCaptcha?: boolean } = {}) {
+  async function runAction(account: Account, action: AccountAction, options: { quiet?: boolean } = {}) {
     if (!lock(account.id)) return
     setOutcomes(values => ({ ...values, [account.id]: { state: 'running', text: '正在处理…' } }))
     try {
@@ -603,56 +425,35 @@ export function Credit() {
       }
       if (!options.quiet) (hasFailed ? toast.bad : toast.ok)(`${account.name}：${text}`)
     } catch (e) {
-      if (e instanceof CreditError && e.code === 'captcha_required' && account.provider === 'zcode' && !options.retry) {
-        queue(account, action)
-        if (options.openCaptcha) setDialog({ kind: 'captcha', accountId: account.id, name: account.name })
-      } else {
-        const text = `${message(e)}${options.retry ? '；已完成唯一一次重试，请重新发起并获取新验证码。' : ''}`
-        setOutcomes(values => ({ ...values, [account.id]: { state: 'error', text } }))
-        if (action.action === 'credits') setCreditErrors(values => ({ ...values, [account.id]: text }))
-        if (!options.quiet) toast.bad(`${account.name}：${text}`)
-      }
+      const text = message(e)
+      setOutcomes(values => ({ ...values, [account.id]: { state: 'error', text } }))
+      if (action.action === 'credits') setCreditErrors(values => ({ ...values, [account.id]: text }))
+      if (!options.quiet) toast.bad(`${account.name}：${text}`)
     } finally { unlock(account.id); if (mounted.current) refresh() }
   }
-  function claim(account: Account, campaignId?: string, open = true) {
-    const action: AccountAction = { id: account.id, action: 'claim', ...(campaignId ? { campaignId } : {}) }
-    if (account.provider === 'zcode') {
-      queue(account, action)
-      if (open) setDialog({ kind: 'captcha', accountId: account.id, name: account.name })
-    } else void runAction(account, action, { openCaptcha: open })
+  function claim(account: Account, campaignId?: string) {
+    void runAction(account, { id: account.id, action: 'claim', ...(campaignId ? { campaignId } : {}) })
   }
   async function batchClaim() {
     if (batchLock.current) return
     batchLock.current = true
     setBatch(true)
-    const targets = visible.filter(account => account.enabled && !busyIds.has(account.id) && !pendingRef.current.some(item => item.accountId === account.id))
+    const targets = visible.filter(account => account.enabled && !busyIds.has(account.id))
     try {
       for (const account of targets) {
         if (!mounted.current) break
-        if (account.provider === 'zcode') claim(account, undefined, false)
-        else await runAction(account, { id: account.id, action: 'claim' }, { quiet: true })
+        await runAction(account, { id: account.id, action: 'claim' }, { quiet: true })
       }
-      if (mounted.current) toast.info('本轮已逐号处理，请查看每个账户的结果；待验证码账户尚未领取。')
+      if (mounted.current) toast.info('本轮已逐号处理，请查看每个账户的领取结果。')
     } finally { batchLock.current = false; if (mounted.current) setBatch(false) }
   }
-  async function completeCaptcha(accountId: string, requestId?: string) {
-    if (!requestId) {
-      const item = pendingRef.current.find(value => value.accountId === accountId)
-      const account = accounts.find(value => value.id === accountId)
-      removePending(accountId)
-      if (item && account) await runAction(account, item.action, { retry: true })
-    }
-    refresh()
-  }
-  const busy = (account: Account) => busyIds.has(account.id) || batch || pending.some(item => item.accountId === account.id)
+  const busy = (account: Account) => busyIds.has(account.id) || batch
   return (
     <>
       <PageTitle title="Credit" description="管理你自己的账户、模型和额度。按渠道独立管理，不合并不同单位的余额。" actions={<><Button size="sm" onClick={() => setDialog({ kind: 'import' })}><Upload size={14} />导入</Button><Button size="sm" disabled={!accounts.length} onClick={() => setDialog({ kind: 'export' })}><Download size={14} />备份导出</Button></>} />
       <div className="space-y-4">
-        <Card><CardBody className="flex flex-wrap items-center justify-between gap-5"><div className="flex flex-wrap gap-8"><Stat label="已连接账户" value={data ? accounts.length : '未知'} hint="仅显示凭据指纹" /><Stat label="已启用" value={data ? accounts.filter(a => a.enabled).length : '未知'} hint="顺序决定渠道内优先级" /><Stat label="待补验" value={captchaRequests.error ? '未知' : requests.length + pending.filter(item => !requests.some(r => r.accountId === item.accountId)).length} hint="请保持本页打开" /></div><div className="space-y-2"><div className="flex items-center justify-between gap-4"><span className="text-[13px] font-medium text-[var(--ink)]">自动签到（全部渠道）</span><Switch label="自动签到（全部渠道）" checked={data?.autoClaim ?? false} disabled={!data || settings.busy} onChange={value => void settings.run(async () => { const result = await creditApi.settings(value); if (!result.ok) throw new Error('自动签到设置未保存'); refresh(); toast.ok(value ? '自动签到已开启，需验证码时仍需人工完成' : '自动签到已关闭') })} /></div><p className="max-w-xs text-[11.5px] text-[var(--ink-3)]">仅由你显式开启；验证码不能由后台代替完成。</p>{settings.busy && <Spinner />}{settings.error && <ErrorNote>{settings.error}</ErrorNote>}</div></CardBody></Card>
-        <div role="tablist" aria-label="Credit 渠道" className="grid grid-cols-2 gap-2 sm:grid-cols-4">{channels.map(item => <button key={item.id} id={`credit-tab-${item.id}`} role="tab" aria-controls={`credit-panel-${providerId}`} aria-selected={providerId === item.id} tabIndex={providerId === item.id ? 0 : -1} onKeyDown={e => { if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') { e.preventDefault(); const next = channels[(channels.findIndex(c => c.id === item.id) + (e.key === 'ArrowRight' ? 1 : 3)) % 4].id; setProviderId(next); document.getElementById(`credit-tab-${next}`)?.focus() } }} onClick={() => setProviderId(item.id)} className={cn('fmh-hoverable rounded-[var(--r-md)] border p-3 text-left transition-colors', providerId === item.id ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]' : 'border-[var(--line)] bg-[var(--surface)] text-[var(--ink-2)]')}><span className="flex items-center justify-between gap-2 text-[13.5px] font-semibold">{item.name}<Badge tone={providerId === item.id ? 'accent' : 'idle'}>{data ? accounts.filter(account => account.provider === item.id).length : '—'}</Badge></span><span className="mt-1 block text-[11.5px] text-[var(--ink-3)]">{item.description}</span></button>)}</div>
-        {captchaRequests.error && <ErrorNote>补验状态读取失败：{message(captchaRequests.error)}。无法判断是否有待验证码请求。<Button className="ml-2" size="sm" onClick={() => void captchaRequests.refetch()}>重试</Button></ErrorNote>}
-        {(requests.length > 0 || pending.length > 0) && <Card><CardHeader title={<span className="inline-flex items-center gap-2"><ShieldCheck size={15} />等待浏览器验证码</span>} description="每次验证只供一次请求消费。单号失败不会中断其他账户。" /><CardBody className="space-y-2">{pending.map(item => { const account = accounts.find(a => a.id === item.accountId); return <div key={`local-${item.accountId}`} className="flex flex-wrap items-center justify-between gap-2 text-[12.5px]"><span>{account?.name || '账户已移除'} · 待继续 {item.action.action === 'claim' ? '领取 / 签到' : item.action.action}</span><div className="flex gap-2"><Button size="sm" disabled={!account || !!dialog || busyIds.has(item.accountId)} onClick={() => setDialog({ kind: 'captcha', accountId: item.accountId, name: account?.name ?? '账户' })}>完成官方验证码</Button><Button size="sm" variant="ghost" disabled={!!dialog || busyIds.has(item.accountId)} onClick={() => { removePending(item.accountId); setOutcomes(values => ({ ...values, [item.accountId]: { state: 'error', text: '已取消本页待执行操作，未自动重试。' } })) }}>取消操作</Button></div></div> })}{requests.map(item => <div key={item.id} className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--line)] pt-2 text-[12.5px]"><span>{accounts.find(a => a.id === item.accountId)?.name || '待补验账户'} · 后台补验 · 到期 {date(item.expiresAt)}</span><Button size="sm" disabled={!!dialog || busyIds.has(item.accountId)} onClick={() => setDialog({ kind: 'captcha', accountId: item.accountId, name: accounts.find(a => a.id === item.accountId)?.name ?? '待补验账户', requestId: item.id })}>为此请求验证</Button></div>)}</CardBody></Card>}
+        <Card><CardBody className="flex flex-wrap items-center justify-between gap-5"><div className="flex flex-wrap gap-8"><Stat label="已连接账户" value={data ? accounts.length : '未知'} hint="仅显示凭据指纹" /><Stat label="已启用" value={data ? accounts.filter(a => a.enabled).length : '未知'} hint="顺序决定渠道内优先级" /></div><div className="space-y-2"><div className="flex items-center justify-between gap-4"><span className="text-[13px] font-medium text-[var(--ink)]">自动签到（全部渠道）</span><Switch label="自动签到（全部渠道）" checked={data?.autoClaim ?? false} disabled={!data || settings.busy} onChange={value => void settings.run(async () => { const result = await creditApi.settings(value); if (!result.ok) throw new Error('自动签到设置未保存'); refresh(); toast.ok(value ? '自动签到已开启，到点按活动清单领取' : '自动签到已关闭') })} /></div><p className="max-w-xs text-[11.5px] text-[var(--ink-3)]">仅由你显式开启；到点只按活动清单领取，不会发送推理请求。</p>{settings.busy && <Spinner />}{settings.error && <ErrorNote>{settings.error}</ErrorNote>}</div></CardBody></Card>
+        <div role="tablist" aria-label="Credit 渠道" className="grid grid-cols-2 gap-2 sm:grid-cols-3">{channels.map(item => <button key={item.id} id={`credit-tab-${item.id}`} role="tab" aria-controls={`credit-panel-${providerId}`} aria-selected={providerId === item.id} tabIndex={providerId === item.id ? 0 : -1} onKeyDown={e => { if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') { e.preventDefault(); const step = e.key === 'ArrowRight' ? 1 : channels.length - 1; const next = channels[(channels.findIndex(c => c.id === item.id) + step) % channels.length].id; setProviderId(next); document.getElementById(`credit-tab-${next}`)?.focus() } }} onClick={() => setProviderId(item.id)} className={cn('fmh-hoverable rounded-[var(--r-md)] border p-3 text-left transition-colors', providerId === item.id ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]' : 'border-[var(--line)] bg-[var(--surface)] text-[var(--ink-2)]')}><span className="flex items-center justify-between gap-2 text-[13.5px] font-semibold">{item.name}<Badge tone={providerId === item.id ? 'accent' : 'idle'}>{data ? accounts.filter(account => account.provider === item.id).length : '—'}</Badge></span><span className="mt-1 block text-[11.5px] text-[var(--ink-3)]">{item.description}</span></button>)}</div>
         {query.error && <ErrorNote>账户数据读取失败：{message(query.error)}{data ? '。以下为上次加载的数据。' : ''}<Button size="sm" className="ml-2" onClick={() => void query.refetch()}>重试</Button></ErrorNote>}
         <section role="tabpanel" id={`credit-panel-${providerId}`} aria-labelledby={`credit-tab-${providerId}`} className="space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-3"><h2 className="text-[15px] font-semibold text-[var(--ink)]">{channel.name} 账户</h2><div className="flex flex-wrap gap-2"><Button size="sm" disabled={query.isFetching} onClick={() => void query.refetch()}>{query.isFetching ? <Spinner /> : <RefreshCw size={13} />}刷新列表</Button><Button size="sm" disabled={batch || !visible.some(a => a.enabled && !busy(a))} onClick={() => void batchClaim()}>{batch ? <Spinner /> : <Gift size={13} />}{batch ? '逐号签到中…' : '本渠道批量签到'}</Button><Button size="sm" variant="primary" disabled={!provider?.loginModes.length} onClick={() => { if (provider) setDialog({ kind: 'login', provider }) }}><ExternalLink size={13} />浏览器登录</Button></div></div>
@@ -666,10 +467,10 @@ export function Credit() {
                 {account.error && <ErrorNote>{account.error}</ErrorNote>}
                 {expired(account.expiresAt) && <Notice tone="warn">凭据已过期，请刷新凭据或重新登录。过期不表示账户余额为 0。</Notice>}
                 {cooling && <Notice tone="warn">账户冷却至 {date(account.cooldownUntil)}。建议等待冷却结束；重置只清除本地状态，不能绕过上游限制。</Notice>}
-                <div className="flex flex-wrap items-center gap-2"><Button size="sm" disabled={accountBusy} onClick={() => void runAction(account, { id: account.id, action: 'credits' }, { openCaptcha: true })}><Wallet size={13} />查询余额</Button><Button size="sm" disabled={accountBusy} onClick={() => claim(account)}><Gift size={13} />单号签到</Button><Button size="sm" disabled={accountBusy} onClick={() => void runAction(account, { id: account.id, action: 'refresh' }, { openCaptcha: true })}><KeyRound size={13} />刷新凭据</Button><Button size="sm" disabled={accountBusy} onClick={() => void runAction(account, { id: account.id, action: 'models' }, { openCaptcha: true })}><RefreshCw size={13} />刷新模型</Button>{provider?.loginModes.length ? <Button size="sm" disabled={accountBusy} onClick={() => setDialog({ kind: 'login', provider, accountId: account.id })}>重新登录</Button> : null}<Button size="sm" variant="ghost" disabled={accountBusy} onClick={() => setDialog({ kind: 'test', account })}>手动测试（耗额度）</Button><Button size="sm" variant="ghost" disabled={accountBusy} onClick={() => setDialog({ kind: 'reset', account })}>重置状态</Button>{busyIds.has(account.id) && <Spinner />}</div>
-                {outcome && <div aria-live="polite" className="space-y-2"><Notice tone={outcome.state === 'error' ? 'bad' : outcome.state === 'captcha' ? 'warn' : outcome.state === 'ok' ? 'ok' : 'accent'}>{outcome.text}</Notice>{outcome.result?.results?.map((result, resultIndex) => <div key={`${result.id}-${resultIndex}`} className="flex flex-wrap items-center gap-2 text-[12px]"><Badge tone={result.claimed || result.alreadyClaimed ? 'ok' : 'bad'}>{result.alreadyClaimed ? '已领过' : result.claimed ? '领取成功' : '未领取'}</Badge><span>{result.name} · 数量 {quantity(result.amount)}</span><span className="text-[var(--ink-3)]">{result.message}</span></div>)}</div>}
+                <div className="flex flex-wrap items-center gap-2"><Button size="sm" disabled={accountBusy} onClick={() => void runAction(account, { id: account.id, action: 'credits' })}><Wallet size={13} />查询余额</Button><Button size="sm" disabled={accountBusy} onClick={() => claim(account)}><Gift size={13} />单号签到</Button><Button size="sm" disabled={accountBusy} onClick={() => void runAction(account, { id: account.id, action: 'refresh' })}><KeyRound size={13} />刷新凭据</Button><Button size="sm" disabled={accountBusy} onClick={() => void runAction(account, { id: account.id, action: 'models' })}><RefreshCw size={13} />刷新模型</Button>{provider?.loginModes.length ? <Button size="sm" disabled={accountBusy} onClick={() => setDialog({ kind: 'login', provider, accountId: account.id })}>重新登录</Button> : null}<Button size="sm" variant="ghost" disabled={accountBusy} onClick={() => setDialog({ kind: 'test', account })}>手动测试（耗额度）</Button><Button size="sm" variant="ghost" disabled={accountBusy} onClick={() => setDialog({ kind: 'reset', account })}>重置状态</Button>{busyIds.has(account.id) && <Spinner />}</div>
+                {outcome && <div aria-live="polite" className="space-y-2"><Notice tone={outcome.state === 'error' ? 'bad' : outcome.state === 'ok' ? 'ok' : 'accent'}>{outcome.text}</Notice>{outcome.result?.results?.map((result, resultIndex) => <div key={`${result.id}-${resultIndex}`} className="flex flex-wrap items-center gap-2 text-[12px]"><Badge tone={result.claimed || result.alreadyClaimed ? 'ok' : 'bad'}>{result.alreadyClaimed ? '已领过' : result.claimed ? '领取成功' : '未领取'}</Badge><span>{result.name} · 数量 {quantity(result.amount)}</span><span className="text-[var(--ink-3)]">{result.message}</span></div>)}</div>}
                 <CreditBalances credits={account.credits} staleError={creditErrors[account.id]} busy={accountBusy} onClaim={campaignId => claim(account, campaignId)} />
-                <div className="flex flex-wrap gap-x-4 gap-y-1 border-t border-[var(--line)] pt-2 text-[11.5px] text-[var(--ink-3)]"><span>模型 {modelList(account).length || '未知'} · 禁用 {account.disabledModels.length}</span><span>effort：{account.effort || '默认'}</span><span>Max Mode：{account.maxMode ? '开启' : '关闭'}</span>{account.provider === 'zcode' && <span className={account.officialIdentity ? 'text-[var(--bad)]' : undefined}>官方身份：{account.officialIdentity ? '开启' : '关闭'}</span>}</div>
+                <div className="flex flex-wrap gap-x-4 gap-y-1 border-t border-[var(--line)] pt-2 text-[11.5px] text-[var(--ink-3)]"><span>模型 {modelList(account).length || '未知'} · 禁用 {account.disabledModels.length}</span><span>effort：{account.effort || '默认'}</span><span>Max Mode：{account.maxMode ? '开启' : '关闭'}</span></div>
               </CardBody>
             </Card>
           })}
@@ -678,11 +479,10 @@ export function Credit() {
       {dialog?.kind === 'import' && <CredentialDialog onClose={() => setDialog(null)} onDone={refresh} />}
       {dialog?.kind === 'export' && <ExportDialog onClose={() => setDialog(null)} />}
       {dialog?.kind === 'edit' && <AccountSettings account={dialog.account} models={modelList(dialog.account)} onClose={() => setDialog(null)} onSave={update} />}
-      {dialog?.kind === 'delete' && <ConfirmDialog title="删除账户" label="确认删除" danger onClose={() => setDialog(null)} onConfirm={async () => { const result = await creditApi.delete(dialog.account.id); if (!result.ok) throw new Error('删除未成功'); removePending(dialog.account.id); refresh(); toast.ok('账户已删除') }}><Notice tone="warn">确定删除“{dialog.account.name}”？这会移除保存在此服务中的账户凭据，无法撤销，不会注销官方账户。</Notice></ConfirmDialog>}
+      {dialog?.kind === 'delete' && <ConfirmDialog title="删除账户" label="确认删除" danger onClose={() => setDialog(null)} onConfirm={async () => { const result = await creditApi.delete(dialog.account.id); if (!result.ok) throw new Error('删除未成功'); refresh(); toast.ok('账户已删除') }}><Notice tone="warn">确定删除“{dialog.account.name}”？这会移除保存在此服务中的账户凭据，无法撤销，不会注销官方账户。</Notice></ConfirmDialog>}
       {dialog?.kind === 'reset' && <ConfirmDialog title="重置账户状态" label="确认重置" onClose={() => setDialog(null)} onConfirm={async () => { await runAction(dialog.account, { id: dialog.account.id, action: 'reset' }) }}><Notice tone="warn">仅重置“{dialog.account.name}”在此服务中的错误 / 冷却状态，不增加额度，也不能解除上游风控或限流。</Notice></ConfirmDialog>}
-      {dialog?.kind === 'test' && <TestDialog account={dialog.account} models={modelList(dialog.account)} onClose={() => setDialog(current => current?.kind === 'test' ? null : current)} onTest={model => runAction(dialog.account, { id: dialog.account.id, action: 'test', model }, { openCaptcha: true })} />}
+      {dialog?.kind === 'test' && <TestDialog account={dialog.account} models={modelList(dialog.account)} onClose={() => setDialog(current => current?.kind === 'test' ? null : current)} onTest={model => runAction(dialog.account, { id: dialog.account.id, action: 'test', model })} />}
       {dialog?.kind === 'login' && <LoginDialog provider={dialog.provider} accountId={dialog.accountId} onClose={() => setDialog(null)} onDone={refresh} />}
-      {dialog?.kind === 'captcha' && <CaptchaDialog key={`${dialog.accountId}-${dialog.requestId ?? 'local'}`} accountId={dialog.accountId} name={dialog.name} requestId={dialog.requestId} onClose={() => setDialog(null)} onSubmitted={() => completeCaptcha(dialog.accountId, dialog.requestId)} />}
     </>
   )
 }

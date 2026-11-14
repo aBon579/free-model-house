@@ -76,6 +76,15 @@ func traeRandom(n int) (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+// traeTraceID 派生一次登录的关联 id：拼接串的后 16 字符，不足 16 时左补零。
+func traeTraceID(machineID, deviceID string) string {
+	joined := machineID + deviceID
+	if len(joined) < 16 {
+		return strings.Repeat("0", 16-len(joined)) + joined
+	}
+	return joined[len(joined)-16:]
+}
+
 func (a *traeAdapter) StartLogin(ctx context.Context, method string) (*Login, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -84,13 +93,19 @@ func (a *traeAdapter) StartLogin(ctx context.Context, method string) (*Login, er
 		return nil, errors.New("TRAE 仅支持浏览器登录并手动粘贴回调 URL")
 	}
 	data := Credential{}
-	for _, key := range []string{"login_trace_id", "clientId", "machineId", "deviceId"} {
+	for _, key := range []string{"machineId", "deviceId"} {
 		v, err := traeRandom(16)
 		if err != nil {
 			return nil, err
 		}
 		data[key] = v
 	}
+	// ⚠️ client_id 是**产品**标识，不是每次登录现编的随机值：授权页第一屏就校验它，
+	//	发随机串过去只会得到「登录失败」，用户连授权的机会都没有。
+	data["clientId"] = traeOAuthClient
+	// trace 由上面两个设备号派生 —— 它是回调反查本次会话的唯一线索
+	//（TRAE 不保证把 machine_id/device_id 原样回传，但会回传 login_trace_id）。
+	data["login_trace_id"] = traeTraceID(data.Text("machineId"), data.Text("deviceId"))
 	data["callbackURL"] = traeCallback
 	data["deviceBrand"] = "PC"
 	data["deviceType"] = "PC"
@@ -762,7 +777,7 @@ func (a *traeAdapter) Credits(ctx context.Context, c Credential) (Credits, error
 	return out, nil
 }
 
-func (a *traeAdapter) Claim(ctx context.Context, c Credential, id, _ string) (ClaimResult, error) {
+func (a *traeAdapter) Claim(ctx context.Context, c Credential, id string) (ClaimResult, error) {
 	out := ClaimResult{ID: traeCheckinID, Name: "每日签到"}
 	if id != "" && id != traeCheckinID {
 		return out, errors.New("TRAE 不支持该领取项目")

@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 
-export type ProviderId = 'qoder' | 'qodercn' | 'trae' | 'zcode'
+export type ProviderId = 'qoder' | 'qodercn' | 'trae'
 export type CreditDate = number | string
 
 export interface Model {
@@ -33,8 +33,6 @@ export interface Account {
   disabledModels: string[]
   effort: string
   maxMode: boolean
-  /** 仅 ZCode：按官方客户端形态发送推理请求。默认关闭。 */
-  officialIdentity?: boolean
   credits?: Credits
   error?: string
   cooldownUntil?: number
@@ -71,8 +69,6 @@ export interface AccountUpdate {
   disabledModels?: string[]
   effort?: string
   maxMode?: boolean
-  /** 仅 ZCode 账号可改；其他提供方带这个字段会被后端拒绝。 */
-  officialIdentity?: boolean
   move?: 'up' | 'down'
 }
 
@@ -81,7 +77,6 @@ export interface AccountAction {
   action: 'refresh' | 'models' | 'credits' | 'claim' | 'test' | 'reset'
   campaignId?: string
   model?: string
-  captchaVerifyParam?: string
 }
 
 export interface ActionResult {
@@ -89,21 +84,6 @@ export interface ActionResult {
   credits?: Credits
   results?: { id: string; name: string; claimed: boolean; alreadyClaimed: boolean; amount?: number; message: string }[]
   message?: string
-}
-
-export interface CaptchaRequest {
-  id: string
-  accountId: string
-  provider: ProviderId
-  expiresAt: CreditDate
-}
-
-export interface CaptchaConfig {
-  sceneId: string
-  prefix: string
-  region: string
-  sdkUrl: string
-  requests?: { id: string; accountId: string }[]
 }
 
 export interface ImportAccount {
@@ -164,13 +144,12 @@ export const creditApi = {
   settings: (autoClaim: boolean) => request<{ ok: boolean }>('/settings', { autoClaim }),
   login: (body: { provider: ProviderId; mode?: string; accountId?: string }) => request<Login>('/login', body),
   loginStatus: (id: string, signal?: AbortSignal) => request<Login>(`/login?id=${encodeURIComponent(id)}`, undefined, signal),
+  // TRAE 是手动那条：后端刻意**不轮询**它（轮询要 NAS 监听自己的 localhost），
+  // 由用户粘贴跳转 URL 换取凭据。其余渠道靠 loginStatus 轮询，不需要这个。
   completeLogin: (id: string, callback: string) => request<unknown>('/login/complete', { id, callback }),
   cancelLogin: (id: string) => request<unknown>('/login/cancel', { id }),
   import: (accounts: ImportAccount[]) => request<{ imported: number }>('/import', { accounts }),
   export: () => request<{ format: 'fmh-credit'; version: 1; accounts: ImportAccount[] }>('/export', { confirm: true }),
-  captchaConfig: (id: string, signal?: AbortSignal) => request<CaptchaConfig>(`/captcha?id=${encodeURIComponent(id)}`, undefined, signal),
-  captcha: (body: { id: string; requestId?: string; captchaVerifyParam: string }) => request<{ ok?: boolean }>('/captcha', body),
-  captchaRequests: (signal?: AbortSignal) => request<{ requests: CaptchaRequest[] }>('/captcha/requests', undefined, signal),
 }
 
 export function useCredit() {
@@ -178,17 +157,6 @@ export function useCredit() {
     queryKey: ['credit'],
     queryFn: ({ signal }) => creditApi.state(signal),
     refetchInterval: 30_000,
-    retry: false,
-    gcTime: 0,
-  })
-}
-
-export function useCreditCaptchaRequests() {
-  return useQuery({
-    queryKey: ['credit-captcha-requests'],
-    queryFn: ({ signal }) => creditApi.captchaRequests(signal),
-    refetchInterval: 5_000,
-    refetchIntervalInBackground: true,
     retry: false,
     gcTime: 0,
   })

@@ -64,7 +64,7 @@ func (f *fakeBackend) Candidates(provider, model, accountID string) []credit.Acc
 	return out
 }
 
-func (f *fakeBackend) Prepare(_ context.Context, id string, in credit.Inference, _ string) (credit.Prepared, error) {
+func (f *fakeBackend) Prepare(_ context.Context, id string, in credit.Inference) (credit.Prepared, error) {
 	f.mu.Lock()
 	f.attempts = append(f.attempts, id)
 	f.mu.Unlock()
@@ -178,7 +178,7 @@ func account(id, provider, model string) credit.Account {
 func laneFor(url, wire string, accounts ...credit.Account) (*Lane, *fakeBackend) {
 	f := &fakeBackend{
 		accounts:   accounts,
-		providers:  []credit.Provider{{ID: "qoder", Name: "Qoder"}, {ID: "trae", Name: "TRAE"}, {ID: "zcode", Name: "ZCode"}},
+		providers:  []credit.Provider{{ID: "qoder", Name: "Qoder"}, {ID: "trae", Name: "TRAE"}},
 		urls:       map[string]string{},
 		wires:      map[string]string{},
 		prepareErr: map[string]error{},
@@ -454,45 +454,6 @@ func TestQoderPlainEnvelopePassesThrough(t *testing.T) {
 
 // ── 风控码：上游在 HTTP 层回的 JSON 错误体 ─────────────────────────────
 
-func TestRiskControlDoesNotWalkTheAccountPool(t *testing.T) {
-	// 实测形状：HTTP 405（不是 403）+ 一个 JSON 体，业务码 3012。
-	//
-	// ⚠️ 3012 带**账号级累进惩罚**（30 分钟 → 24 小时内第 3 次起 24 小时 →
-	//
-	//	累计 5 次停用账号），所以这里守的是三件事：
-	//	不换账号重放、把这个账号本地停住（对齐上游第一档罚时）、给客户端的是人话。
-	srv := upstream(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		fmt.Fprint(w, `{"code":3012,"msg":"request has been blocked due to unusual activity.","logid":"20261114061427"}`)
-	})
-	l, f := laneFor(srv.URL, "messages", account("a1", "zcode", "m"), account("a2", "zcode", "m"))
-	_, _, uerr := l.Do(context.Background(), turnFor("zcode/m"), nil)
-	if uerr == nil {
-		t.Fatal("风控拒绝该报错，不该静默结束")
-	}
-	if got := f.tried(); got != "a1" {
-		t.Errorf("换账号重放会把惩罚计数摊到整池账号上，实际试过 %q", got)
-	}
-	if strings.Contains(uerr.Message, "logid") || strings.Contains(uerr.Message, `\"`) {
-		t.Errorf("message 里漏了整段原始 JSON：%q", uerr.Message)
-	}
-	if !strings.Contains(uerr.Message, "风控") || !strings.Contains(uerr.Message, "3012") {
-		t.Errorf("message 要说清是什么被拒、上游码是多少：%q", uerr.Message)
-	}
-	if codeOf(uerr) != lane.CodeClient {
-		t.Errorf("码 = %s，want CLIENT_ERROR（不可轮换）", codeOf(uerr))
-	}
-	if uerr.RetryAfterSec != 1800 {
-		t.Errorf("RetryAfterSec = %d，want 1800（客户端要拿到真实的退避，不能再顶一发惩罚）", uerr.RetryAfterSec)
-	}
-	if got := f.logged(); !strings.Contains(got, "fail a1 CLIENT_ERROR 30m0s") {
-		t.Errorf("logged = %q, want 本地把这个账号停 30 分钟（与上游第一档罚时对齐）", got)
-	}
-	if uerr.Status != http.StatusMethodNotAllowed {
-		t.Errorf("status = %d，want 405（JSON 体里没有状态字段，只能由发请求那边带回来）", uerr.Status)
-	}
-}
-
 func TestEnvelopeFailureKeepsNonJSONText(t *testing.T) {
 	// 上游也可能直接回一句纯文本（网关自己吐的 "Internal Server Error"）。
 	// 这种没有码可拆，原样退回，别把它改写成"认不出来的帧"。
@@ -587,45 +548,7 @@ func TestTraeDoneWithoutFinishReasonStillCloses(t *testing.T) {
 	}
 }
 
-// ── ZCode（直通）────────────────────────────────────────────────────
-
-func TestZcodePassesAnthropicFramesThrough(t *testing.T) {
-	body := "data:" + `{"type":"message_start","message":{"usage":{"input_tokens":21}}}` + "\n\n" +
-		"data:" + `{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}` + "\n\n" +
-		"data:" + `{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"嗯"}}` + "\n\n" +
-		"data:" + `{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}` + "\n\n" +
-		"data:" + `{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"好"}}` + "\n\n" +
-		"data:" + `{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":6}}` + "\n\n" +
-		"data:" + `{"type":"message_stop"}` + "\n\n"
-
-	l, _ := laneFor(sseURL(t, body), "messages", account("a1", "zcode", "glm"))
-	var got seen
-	usage, finish, uerr := l.Do(context.Background(), turnFor("zcode/glm"), got.emit)
-	if uerr != nil {
-		t.Fatalf("Do: %v", uerr)
-	}
-	if got.text != "好" {
-		t.Errorf("text = %q, want 好", got.text)
-	}
-	if got.reason != "嗯" {
-		t.Errorf("reasoning = %q", got.reason)
-	}
-	if finish != lane.FinishStop {
-		t.Errorf("finish = %s", finish)
-	}
-	if usage == nil || usage.Input != 21 || usage.Output != 6 {
-		t.Errorf("usage = %+v", usage)
-	}
-}
-
-func TestZcodeStreamErrorFrame(t *testing.T) {
-	body := "data:" + `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}` + "\n\n"
-	l, _ := laneFor(sseURL(t, body), "messages", account("a1", "zcode", "glm"))
-	_, _, uerr := l.Do(context.Background(), turnFor("zcode/glm"), nil)
-	if uerr == nil {
-		t.Fatal("want error")
-	}
-}
+// ── 帧形翻译：认不出的帧形必须报错 ─────────────────────────────────
 
 func TestUnknownWireIsRefusedNotGuessed(t *testing.T) {
 	// ⚠️ 认不出帧形就退回 chat 的话，最可能的结果是"内容全空但流正常结束"——
@@ -812,9 +735,8 @@ func TestListModelsDedupesAndSkipsDisabled(t *testing.T) {
 	// 停用的账号**一个模型都不贡献**。
 	a3 := account("a3", "trae", "solo")
 	a3.Enabled = false
-	a4 := account("a4", "zcode", "glm")
 
-	l, _ := laneFor("", "qoder", a1, a2, a3, a4)
+	l, _ := laneFor("", "qoder", a1, a2, a3)
 	models, uerr := l.ListModels(context.Background())
 	if uerr != nil {
 		t.Fatalf("ListModels: %v", uerr)
@@ -823,7 +745,7 @@ func TestListModelsDedupesAndSkipsDisabled(t *testing.T) {
 	for _, m := range models {
 		ids = append(ids, m.ID)
 	}
-	want := "credit/qoder/m1,credit/qoder/m2,credit/zcode/glm"
+	want := "credit/qoder/m1,credit/qoder/m2"
 	if got := strings.Join(ids, ","); got != want {
 		t.Errorf("ids = %q, want %s", got, want)
 	}
@@ -834,10 +756,6 @@ func TestListModelsDedupesAndSkipsDisabled(t *testing.T) {
 	}
 	if byID["credit/qoder/m2"].Wire != "chat" {
 		t.Errorf("qoder wire = %s", byID["credit/qoder/m2"].Wire)
-	}
-	// ZCode 的上游就说 Anthropic 帧形 —— 直通，不翻译。
-	if byID["credit/zcode/glm"].Wire != "messages" {
-		t.Errorf("zcode wire = %s, want messages", byID["credit/zcode/glm"].Wire)
 	}
 	info := byID["credit/qoder/m2"]
 	if !info.Reasoning || !info.CanDisableThinking || len(info.Efforts) != 2 {
@@ -857,7 +775,7 @@ func TestListModelsDedupesAndSkipsDisabled(t *testing.T) {
 		t.Error("Ready = false, want true")
 	}
 	status := l.Status()
-	if status.ModelCount != 3 || status.AutoProbe || !status.NeedsCredential || !status.Ready {
+	if status.ModelCount != 2 || status.AutoProbe || !status.NeedsCredential || !status.Ready {
 		t.Errorf("status = %+v", status)
 	}
 	if status.Reason != "" {

@@ -13,13 +13,12 @@ import (
 	"github.com/aBon579/free-model-house/internal/lane"
 )
 
-// **三家上游的响应帧形翻译**。
+// **两家上游的响应帧形翻译**。
 //
 // 请求侧已经统一了（都吃 OpenAI chat 形状），响应侧没有：
 //
 //	Qoder    每帧多一层信封，内层 `body` 才是 OpenAI chunk（**字符串**装的 JSON）
 //	TRAE     具名事件（`output`/`token_usage`/`done`/`error`），字段各家一套
-//	ZCode    标准 Anthropic Messages 帧 —— 解码器本来就会，直通
 //
 // 翻译的产物一律是**规范 OpenAI chunk**，再交给内置的 chat 解码器。
 // 不是为了省事：块序号、工具调用槽位、思考 token 的四种拼法、
@@ -34,13 +33,6 @@ func stream(ctx context.Context, p credit.Prepared, client *http.Client, emit fu
 	}
 	defer body.Close()
 
-	if p.Wire == "messages" {
-		dec, err := lane.NewStreamDecoder("messages", emit)
-		if err != nil {
-			return nil, lane.FinishError, &lane.Error{Code: lane.CodeServer, Message: err.Error()}
-		}
-		return dec.Decode(body)
-	}
 	tr, err := translator(p.Wire)
 	if err != nil {
 		return nil, lane.FinishError, err
@@ -374,20 +366,6 @@ const (
 	// （换账号也没用）。
 	traeDeadSession = "401"
 	traeBadParam    = "4001"
-
-	// codeRiskControl 是 ZCode 通道的风控拒绝（"request has been blocked due to
-	// unusual activity"，实测随 HTTP 405 的 JSON 体回来，不是流内帧）。
-	//
-	// ⚠️ 它有**账号级累进惩罚**（30 分钟 → 24 小时内第 3 次起 24 小时 →
-	//
-	//	累计 5 次直接停用账号），所以结论必须是"停下"：
-	//	既不能归进可重试集合，也不能拿它去轮剩下的账号 ——
-	//	每一次都是往同一个账号的惩罚计数上加一发。
-	codeRiskControl = "3012"
-	// riskControlCoolSec 是吃了 3012 之后**本地**也要把这个账号停住的秒数 ——
-	// 对齐上游第一档罚时（30 分钟）。本地不停，客户端退避完就再来一发，
-	// 而那一发是记在同一个账号头上的。
-	riskControlCoolSec = 1800
 )
 
 // queueWaitSec 是排队时上游没给等待量时的兜底等待。
@@ -435,7 +413,7 @@ func streamFailure(raw []byte) *lane.Error {
 //
 // ⚠️ 统一层不认识这种体时，会把整段原文塞进 Message 就交出来 ——
 //
-//	客户端于是看到 `"message":"{\"code\":3012,\"msg\":\"…\"}"`：
+//	客户端于是看到 `"message":"{\"code\":4008,\"msg\":\"…\"}"`：
 //	一串转义 JSON 人类读不清，业务码也被埋掉了（而码表只认 JSON 字段）。
 //	能按 JSON 解析就重走一遍码表，解析不动就原样退回。
 //	真正的 HTTP 状态码只有发请求那边知道，所以要当兜底状态传进去。
@@ -480,18 +458,6 @@ func failureFrom(obj map[string]any, fallbackStatus int) *lane.Error {
 			Message: withCode("账号套餐不包含这个模型", code, obj)}
 	case code == traeBadParam:
 		return &lane.Error{Code: lane.CodeClient, Status: status, Message: withCode(text, code, obj)}
-	case code == codeRiskControl:
-		// CodeClient 是这里**唯一**正确的码：不换账号（rotatable=false，
-		// 否则一次误点就把整池账号各烧一发风控计数）。
-		//
-		// ⚠️ 但它**要**冷却这个账号 —— 平时 CodeClient 不罚账号（请求本身不合法，
-		//   换谁都一样），而 3012 是"这个账号刚被罚、越试罚得越重"：
-		//   不冷却等于让客户端的下一次重试继续替账号往第 2 档（24 小时）上顶。
-		//   冷却时长对齐上游第一档罚时，并原样透传给客户端（Retry-After）。
-		return &lane.Error{Code: lane.CodeClient, Status: status, RetryAfterSec: riskControlCoolSec,
-			Message: withCode("上游风控拒绝了这次请求：继续重试会把账号罚时从 30 分钟顶到 24 小时，"+
-				"第 5 次直接停用。没开「官方客户端身份」就是该渠道不认第三方客户端；"+
-				"已经开了还吃这个码，说明身份模板与上游当前策略脱钩，请先关掉它", code, obj)}
 	}
 	// 认不出来的：把 message 交给统一分类器，让它按措辞（上下文超限、
 	// 地区受限……）判；判不出来就是上游的 5xx 形状。

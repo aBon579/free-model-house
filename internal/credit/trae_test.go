@@ -124,14 +124,23 @@ func TestTraeLoginMetadataAndTokenRotation(t *testing.T) {
 			t.Fatalf("missing login parameter %s", key)
 		}
 	}
-	if q.Get("client_id") != login.Data.Text("clientId") || q.Get("login_trace_id") != login.Data.Text("login_trace_id") || login.Data.Text("appVersion") != traeVersion {
+	// client_id 认的是**客户端产品**，不是本次会话 —— 授权页第一屏就按它判决，
+	// 发随机值过去只会得到「登录失败」，用户连授权按钮都看不到。
+	if q.Get("client_id") != traeOAuthClient || login.Data.Text("clientId") != traeOAuthClient {
+		t.Fatal("授权链接必须带产品 client_id")
+	}
+	// trace 由设备号派生（对齐官方 machineTraceID），它是回调反查本次会话的凭据。
+	if want := traeTraceID(login.Data.Text("machineId"), login.Data.Text("deviceId")); q.Get("login_trace_id") != want || login.Data.Text("login_trace_id") != want {
+		t.Fatalf("login_trace_id 应由 machineId+deviceId 派生，实际 %q 期望 %q", q.Get("login_trace_id"), want)
+	}
+	if login.Data.Text("appVersion") != traeVersion {
 		t.Fatal("login metadata not retained")
 	}
 	second, err := a.StartLogin(context.Background(), "default")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"clientId", "login_trace_id", "machineId", "deviceId"} {
+	for _, key := range []string{"login_trace_id", "machineId", "deviceId"} {
 		if second.Data.Text(key) == login.Data.Text(key) {
 			t.Fatalf("nonrandom %s", key)
 		}
@@ -581,7 +590,7 @@ func TestTraeClaimSingleAttemptAndHonestResult(t *testing.T) {
 				}
 				return 200, `{"code":0,"message":"success"}`
 			})
-			result, err := a.Claim(context.Background(), traeTestCredential(), traeCheckinID, "")
+			result, err := a.Claim(context.Background(), traeTestCredential(), traeCheckinID)
 			if claims > 1 || strings.Contains(result.Message, "private-secret") {
 				t.Fatal("retried claim or leaked secret")
 			}

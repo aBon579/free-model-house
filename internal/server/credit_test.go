@@ -4,12 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/aBon579/free-model-house/internal/credit"
 	"github.com/aBon579/free-model-house/internal/creditlane"
@@ -90,7 +88,7 @@ func decodeCredit(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
 // ⚠️ 它能读出上游账号的 uid、指纹和余额，所以必须先有管理会话。
 func TestCreditRoutesRequireSession(t *testing.T) {
 	_, s, _ := newCreditAdmin(t, true)
-	for _, path := range []string{"/api/credit", "/api/credit/accounts", "/api/credit/captcha/requests"} {
+	for _, path := range []string{"/api/credit", "/api/credit/accounts", "/api/credit/login"} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		rec := httptest.NewRecorder()
 		s.handleAdmin(rec, req)
@@ -110,8 +108,8 @@ func TestCreditStateAndAddAccount(t *testing.T) {
 	}
 	doc := decodeCredit(t, rec)
 	providers, _ := doc["providers"].([]any)
-	if len(providers) != 4 {
-		t.Fatalf("该有 4 个渠道，实际 %d：%s", len(providers), rec.Body.String())
+	if len(providers) != 3 {
+		t.Fatalf("该有 3 个渠道，实际 %d：%s", len(providers), rec.Body.String())
 	}
 	if accounts, _ := doc["accounts"].([]any); len(accounts) != 0 {
 		t.Fatalf("新库不该有账户：%v", accounts)
@@ -274,78 +272,5 @@ func TestCreditDisabledSaysSo(t *testing.T) {
 	}
 	if doc := decodeCredit(t, rec); doc["error"] == nil || doc["error"] == "" {
 		t.Error("未启用也要说明原因")
-	}
-}
-
-// TestCaptchaStageIsOneShot 验证验证码参数**只够一次**、会过期、也不会无限堆。
-//
-// ⚠️ 一个真实的阿里云验证码参数只能被一次请求消费；
-//
-//	缓存成可复用的东西等于伪造"重复使用验证码"的能力。
-func TestCaptchaStageIsOneShot(t *testing.T) {
-	s := &creditCaptchaStage{tokens: map[string]stagedCaptcha{}}
-	if !s.put("a", "token-a") {
-		t.Fatal("该存下第一个参数")
-	}
-	if got := s.take("a"); got != "token-a" {
-		t.Fatalf("第一次取该拿到参数，实际 %q", got)
-	}
-	if got := s.take("a"); got != "" {
-		t.Fatalf("同一个参数不该取到第二次，实际 %q", got)
-	}
-	if got := s.take("没有这个账户"); got != "" {
-		t.Fatalf("未知账户不该拿到东西，实际 %q", got)
-	}
-
-	s.tokens["过期"] = stagedCaptcha{token: "旧的", expires: time.Now().Add(-time.Second).UnixMilli()}
-	if got := s.take("过期"); got != "" {
-		t.Fatal("过期的参数不该再被用上")
-	}
-
-	for i := 0; i < creditCaptchaMaxKeep+8; i++ {
-		s.put(fmt.Sprintf("账户-%d", i), "参数")
-	}
-	if s.put("挤不进去", "参数") {
-		t.Fatal("超出容量时该拒绝，而不是无限增长")
-	}
-}
-
-// TestCreditCaptchaSubmitWithoutLiveChallenge 验证「先交验证码、后发操作」这条路。
-func TestCreditCaptchaSubmitWithoutLiveChallenge(t *testing.T) {
-	admin, s, session := newCreditAdmin(t, true)
-	rec := creditRequest(t, s, session, http.MethodPost, "/api/credit/captcha",
-		`{"id":"acc-1","captchaVerifyParam":"真实的官方参数"}`)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("暂存验证码失败：%d %s", rec.Code, rec.Body.String())
-	}
-	if got := admin.creditCaptcha.take("acc-1"); got != "真实的官方参数" {
-		t.Fatalf("参数没被暂存，实际 %q", got)
-	}
-	if bytes.Contains(rec.Body.Bytes(), []byte("真实的官方参数")) {
-		t.Error("响应不该回显验证码参数")
-	}
-
-	// 后台已经没有等待中的请求时，带 requestId 的提交该失败而不是假装成功。
-	rec = creditRequest(t, s, session, http.MethodPost, "/api/credit/captcha",
-		`{"id":"acc-1","requestId":"不存在","captchaVerifyParam":"另一个真实参数"}`)
-	if rec.Code == http.StatusOK {
-		t.Fatalf("不存在的补验请求不该被接受：%s", rec.Body.String())
-	}
-
-	rec = creditRequest(t, s, session, http.MethodPost, "/api/credit/captcha", `{"id":"acc-1"}`)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("空参数该 400，实际 %d：%s", rec.Code, rec.Body.String())
-	}
-}
-
-// TestCreditCaptchaRequestsIsAList 验证补验列表的形状（页面每 5 秒轮询它）。
-func TestCreditCaptchaRequestsIsAList(t *testing.T) {
-	_, s, session := newCreditAdmin(t, true)
-	rec := creditRequest(t, s, session, http.MethodGet, "/api/credit/captcha/requests", "")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("读补验列表失败：%d %s", rec.Code, rec.Body.String())
-	}
-	if _, ok := decodeCredit(t, rec)["requests"].([]any); !ok {
-		t.Fatalf("requests 该是数组：%s", rec.Body.String())
 	}
 }

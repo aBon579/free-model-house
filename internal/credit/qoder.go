@@ -255,7 +255,7 @@ func (q *qoderAdapter) Credits(ctx context.Context, c Credential) (Credits, erro
 	return out, nil
 }
 
-func (q *qoderAdapter) Claim(ctx context.Context, c Credential, id, captcha string) (ClaimResult, error) {
+func (q *qoderAdapter) Claim(ctx context.Context, c Credential, id string) (ClaimResult, error) {
 	out := ClaimResult{ID: id, Name: "积分活动"}
 	if id == "" {
 		return out, errors.New("请选择具体活动")

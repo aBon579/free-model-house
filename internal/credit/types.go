@@ -23,6 +23,12 @@ func (c Credential) Text(keys ...string) string {
 	return ""
 }
 
+// Clone 深拷贝一份凭据。
+//
+// ⚠️ 走 JSON 往返而不是手写拷贝 —— 前提是各适配器往 Credential 里写的
+//
+//	**只有 JSON 能表示的值**（字符串、数字、布尔、嵌套对象/数组），
+//	所以解回来的 map 与原对象等价，改一份不会动到另一份。
 func (c Credential) Clone() Credential {
 	b, _ := json.Marshal(c)
 	var out Credential
@@ -96,10 +102,7 @@ type Inference struct {
 	MaxTokens int
 	Effort    string
 	MaxMode   bool
-	// OfficialIdentity 由账号设置带入，目前只有 ZCode 适配器读它：
-	// true 表示按官方客户端的形态带 system 身份块。
-	OfficialIdentity bool
-	SessionID        string
+	SessionID string
 }
 
 type Prepared struct {
@@ -116,10 +119,16 @@ type Adapter interface {
 	Refresh(context.Context, Credential) (Credential, error)
 	Models(context.Context, Credential) ([]Model, error)
 	Credits(context.Context, Credential) (Credits, error)
-	Claim(context.Context, Credential, string, string) (ClaimResult, error)
+	Claim(context.Context, Credential, string) (ClaimResult, error)
 	Prepare(context.Context, Credential, Inference) (Prepared, error)
 }
 
+// APIError 是上游判决在本项目里的形状。
+//
+// ⚠️ Message 只许放**能安全展示给用户**的话：它会经 writeCreditError 原样
+//
+//	回到管理台页面，也会进车道错误里。凭据、令牌、验证码参数一律不能进去 ——
+//	要定位问题用 Status 与 Code，不是把响应体原文塞进文案。
 type APIError struct {
 	Status  int
 	Code    string

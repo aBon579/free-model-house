@@ -25,16 +25,9 @@ type Account struct {
 	DisabledModels []string `json:"disabledModels"`
 	Effort         string   `json:"effort"`
 	MaxMode        bool     `json:"maxMode"`
-	// OfficialIdentity 只对有意义的提供方生效（目前只有 ZCode）：
-	// 打开后，推理请求带上官方客户端的身份块。
-	//
-	// ⚠️ **默认关闭**。它的作用是让上游把我们当成官方客户端，
-	//
-	//	不是修请求格式；上游对拒绝有阶梯处罚（见 zcode_identity.go）。
-	OfficialIdentity bool     `json:"officialIdentity,omitempty"`
-	Credits          *Credits `json:"credits,omitempty"`
-	Error            string   `json:"error,omitempty"`
-	CooldownUntil    int64    `json:"cooldownUntil,omitempty"`
+	Credits        *Credits `json:"credits,omitempty"`
+	Error          string   `json:"error,omitempty"`
+	CooldownUntil  int64    `json:"cooldownUntil,omitempty"`
 }
 
 type storedAccount struct {
@@ -69,9 +62,7 @@ type AccountPatch struct {
 	DisabledModels *[]string `json:"disabledModels"`
 	Effort         *string   `json:"effort"`
 	MaxMode        *bool     `json:"maxMode"`
-	// OfficialIdentity 是"按账号开启官方身份块"的开关（目前只有 ZCode 有意义）。
-	OfficialIdentity *bool  `json:"officialIdentity"`
-	Move             string `json:"move"`
+	Move           string    `json:"move"`
 }
 
 type BackupAccount struct {
@@ -90,25 +81,17 @@ type loginJob struct {
 	targetID string
 }
 
-type CaptchaRequest struct {
-	ID        string `json:"id"`
-	AccountID string `json:"accountId"`
-	Provider  string `json:"provider"`
-	ExpiresAt int64  `json:"expiresAt"`
-	result    chan string
-}
-
 type Manager struct {
-	mu         sync.RWMutex
-	state      state
-	db         *store.DB
-	vault      *store.Vault
-	client     *http.Client
-	adapters   map[string]Adapter
-	jobs       map[string]*loginJob
-	challenges map[string]*CaptchaRequest
-	locks      sync.Map
-	onChange   func()
+	mu       sync.RWMutex
+	state    state
+	db       *store.DB
+	vault    *store.Vault
+	client   *http.Client
+	adapters map[string]Adapter
+	jobs     map[string]*loginJob
+	locks    sync.Map
+	obsolete []string
+	onChange func()
 }
 
 const stateSecret = "credit:accounts:v1"
@@ -116,8 +99,8 @@ const stateSecret = "credit:accounts:v1"
 func NewManager(db *store.DB, vault *store.Vault, client *http.Client) (*Manager, error) {
 	c := *client
 	c.CheckRedirect = func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }
-	m := &Manager{db: db, vault: vault, client: &c, jobs: map[string]*loginJob{}, challenges: map[string]*CaptchaRequest{}, state: state{Accounts: []storedAccount{}, LastAutoClaim: map[string]string{}}}
-	m.adapters = map[string]Adapter{"qoder": NewQoder(&c, false), "qodercn": NewQoder(&c, true), "trae": NewTrae(&c), "zcode": NewZCode(&c)}
+	m := &Manager{db: db, vault: vault, client: &c, jobs: map[string]*loginJob{}, state: state{Accounts: []storedAccount{}, LastAutoClaim: map[string]string{}}}
+	m.adapters = map[string]Adapter{"qoder": NewQoder(&c, false), "qodercn": NewQoder(&c, true), "trae": NewTrae(&c)}
 	sealed, _, found, err := db.GetSecret(stateSecret)
 	if err != nil {
 		return nil, err
@@ -134,8 +117,53 @@ func NewManager(db *store.DB, vault *store.Vault, client *http.Client) (*Manager
 			m.state.LastAutoClaim = map[string]string{}
 		}
 	}
+	dropped, err := m.dropUnknownProviders()
+	if err != nil {
+		return nil, err
+	}
+	m.obsolete = dropped
 	return m, nil
 }
+
+// dropUnknownProviders 清掉提供方已经没有适配器的账号，返回被清掉的账号（供启动日志用）。
+//
+// ⚠️ 这一步是必须的：refresh / Models / Credits / Claim / Prepare 里的适配器查找
+//
+//	**不带存在性检查**，库里留一个孤儿账号就是第一次碰到它时 nil panic。
+//
+// 删的是密封保存的凭据，所以要留个响 —— 静默消失没人能发现。
+func (m *Manager) dropUnknownProviders() ([]string, error) {
+	next := m.copyLocked()
+	kept := make([]storedAccount, 0, len(next.Accounts))
+	dropped := []string{}
+	for _, a := range next.Accounts {
+		if _, ok := m.adapters[a.Provider]; ok {
+			kept = append(kept, a)
+			continue
+		}
+		dropped = append(dropped, a.Provider+" / "+a.Name)
+	}
+	if len(dropped) == 0 {
+		return nil, nil
+	}
+	next.Accounts = kept
+	for id := range next.LastAutoClaim {
+		live := false
+		for _, a := range kept {
+			if a.ID == id {
+				live = true
+				break
+			}
+		}
+		if !live {
+			delete(next.LastAutoClaim, id)
+		}
+	}
+	return dropped, m.saveLocked(next)
+}
+
+// ObsoleteAccounts 是启动时因为提供方已下线而被清掉的账号，用于启动日志。
+func (m *Manager) ObsoleteAccounts() []string { return m.obsolete }
 
 func (m *Manager) SetChangeHook(fn func()) { m.mu.Lock(); m.onChange = fn; m.mu.Unlock() }
 func (m *Manager) changed() {
@@ -181,7 +209,7 @@ func (m *Manager) Snapshot() Snapshot {
 	s := m.copyLocked()
 	m.mu.RUnlock()
 	out := Snapshot{Accounts: []Account{}, Providers: []Provider{}, AutoClaim: s.AutoClaim}
-	for _, p := range []Provider{{ID: "qoder", Name: "Qoder", LoginModes: []string{"default"}}, {ID: "qodercn", Name: "Qoder 中国版", LoginModes: []string{"default"}}, {ID: "trae", Name: "TRAE", LoginModes: []string{"default"}}, {ID: "zcode", Name: "ZCode", LoginModes: []string{"bigmodel", "zai"}}} {
+	for _, p := range []Provider{{ID: "qoder", Name: "Qoder", LoginModes: []string{"default"}}, {ID: "qodercn", Name: "Qoder 中国版", LoginModes: []string{"default"}}, {ID: "trae", Name: "TRAE", LoginModes: []string{"default"}}} {
 		p.Models = []Model{}
 		seen := map[string]bool{}
 		for _, a := range s.Accounts {
@@ -399,15 +427,6 @@ func (m *Manager) Patch(p AccountPatch) error {
 	if p.MaxMode != nil {
 		a.MaxMode = *p.MaxMode
 	}
-	if p.OfficialIdentity != nil {
-		// 只对 ZCode 有意义。存到别的提供方账号上，界面就会显示一个
-		// "打开着但什么都不做"的开关 —— 那比拒绝这次修改更糟。
-		if a.Provider != "zcode" {
-			m.mu.Unlock()
-			return errors.New("只有 ZCode 账号有「官方客户端身份」开关")
-		}
-		a.OfficialIdentity = *p.OfficialIdentity
-	}
 	if p.Move != "" {
 		switch p.Move {
 		case "up":
@@ -514,7 +533,7 @@ func (m *Manager) refresh(ctx context.Context, a storedAccount) (storedAccount, 
 }
 
 func (m *Manager) activeCredential(ctx context.Context, a storedAccount) (storedAccount, error) {
-	if a.ExpiresAt > 0 && a.ExpiresAt < time.Now().Add(2*time.Minute).UnixMilli() && a.Provider != "zcode" {
+	if a.ExpiresAt > 0 && a.ExpiresAt < time.Now().Add(2*time.Minute).UnixMilli() {
 		return m.refresh(ctx, a)
 	}
 	return a, nil
@@ -566,7 +585,7 @@ func (m *Manager) Credits(ctx context.Context, id string) (Credits, error) {
 	return credits, err
 }
 
-func (m *Manager) Claim(ctx context.Context, id, campaignID, captcha string) ([]ClaimResult, error) {
+func (m *Manager) Claim(ctx context.Context, id, campaignID string) ([]ClaimResult, error) {
 	unlock := m.lock(id)
 	defer unlock()
 	a, err := m.account(id)
@@ -594,16 +613,8 @@ func (m *Manager) Claim(ctx context.Context, id, campaignID, captcha string) ([]
 		if !campaign.Claimable {
 			continue
 		}
-		if a.Provider == "zcode" && captcha == "" {
-			return results, &APIError{Status: 409, Code: "captcha_required", Message: "请在浏览器中完成 ZCode 人机验证后领取"}
-		}
-		res, claimErr := adapter.Claim(ctx, a.Credential, campaign.ID, captcha)
-		captcha = ""
+		res, claimErr := adapter.Claim(ctx, a.Credential, campaign.ID)
 		if claimErr != nil {
-			var ae *APIError
-			if errors.As(claimErr, &ae) && ae.Code == "captcha_required" {
-				return results, claimErr
-			}
 			res = ClaimResult{ID: campaign.ID, Name: campaign.Name, Message: claimErr.Error()}
 		}
 		results = append(results, res)
@@ -672,7 +683,7 @@ func (m *Manager) Candidates(provider, model, accountID string) []Account {
 	return out
 }
 
-func (m *Manager) Prepare(ctx context.Context, id string, in Inference, captcha string) (Prepared, error) {
+func (m *Manager) Prepare(ctx context.Context, id string, in Inference) (Prepared, error) {
 	unlock := m.lock(id)
 	defer unlock()
 	a, err := m.account(id)
@@ -717,12 +728,7 @@ func (m *Manager) Prepare(ctx context.Context, id string, in Inference, captcha 
 		}
 	}
 	in.MaxMode = in.MaxMode || a.MaxMode
-	in.OfficialIdentity = a.OfficialIdentity
-	c := a.Credential.Clone()
-	if captcha != "" {
-		c["captchaVerifyParam"] = captcha
-	}
-	return m.adapters[a.Provider].Prepare(ctx, c, in)
+	return m.adapters[a.Provider].Prepare(ctx, a.Credential, in)
 }
 
 func (m *Manager) HTTPClient() *http.Client { return m.client }
@@ -772,9 +778,6 @@ func (m *Manager) autoClaim(ctx context.Context) {
 		if (a.Provider == "qoder" || a.Provider == "qodercn") && now.Hour() < 10 {
 			continue
 		}
-		if a.Provider == "zcode" {
-			continue
-		}
 		// 一天一次自动尝试；失败留给手动重试，避免反复触发领取风控。
 		m.mu.Lock()
 		next := m.copyLocked()
@@ -785,7 +788,7 @@ func (m *Manager) autoClaim(ctx context.Context) {
 			return
 		}
 		jobCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
-		_, _ = m.Claim(jobCtx, a.ID, "", "")
+		_, _ = m.Claim(jobCtx, a.ID, "")
 		cancel()
 	}
 }

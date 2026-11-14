@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/url"
-	"strings"
 	"time"
 )
 
@@ -188,74 +187,4 @@ func (m *Manager) CancelLogin(id string) error {
 		job.cancel()
 	}
 	return nil
-}
-
-func (m *Manager) CaptchaConfig(ctx context.Context, id string) (map[string]any, error) {
-	a, err := m.account(id)
-	if err != nil {
-		return nil, err
-	}
-	provider, ok := m.adapters[a.Provider].(interface {
-		CaptchaConfig(context.Context, Credential) (map[string]any, error)
-	})
-	if !ok {
-		return nil, errors.New("此渠道不使用浏览器验证码")
-	}
-	return provider.CaptchaConfig(ctx, a.Credential)
-}
-
-func (m *Manager) CaptchaRequests() []CaptchaRequest {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	out := []CaptchaRequest{}
-	for _, request := range m.challenges {
-		if request.ExpiresAt > time.Now().UnixMilli() {
-			out = append(out, *request)
-		}
-	}
-	return out
-}
-
-func (m *Manager) WaitCaptcha(ctx context.Context, accountID string) (string, error) {
-	a, err := m.account(accountID)
-	if err != nil {
-		return "", err
-	}
-	request := &CaptchaRequest{ID: randomID(), AccountID: accountID, Provider: a.Provider, ExpiresAt: time.Now().Add(3 * time.Minute).UnixMilli(), result: make(chan string, 1)}
-	m.mu.Lock()
-	if len(m.challenges) >= 20 {
-		m.mu.Unlock()
-		return "", errors.New("待验证请求过多，请稍后重试")
-	}
-	m.challenges[request.ID] = request
-	m.mu.Unlock()
-	defer func() { m.mu.Lock(); delete(m.challenges, request.ID); m.mu.Unlock() }()
-	timer := time.NewTimer(3 * time.Minute)
-	defer timer.Stop()
-	select {
-	case token := <-request.result:
-		return token, nil
-	case <-ctx.Done():
-		return "", ctx.Err()
-	case <-timer.C:
-		return "", &APIError{Status: 409, Code: "captcha_required", Message: "等待人机验证超时，请在 Credit 页面完成验证后重试"}
-	}
-}
-
-func (m *Manager) SubmitCaptcha(accountID, requestID, token string) error {
-	if strings.TrimSpace(token) == "" || len(token) > 65536 {
-		return errors.New("验证码参数为空或过长")
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	request := m.challenges[requestID]
-	if request == nil || request.AccountID != accountID || request.ExpiresAt <= time.Now().UnixMilli() {
-		return errors.New("验证请求已过期或不属于该账号")
-	}
-	select {
-	case request.result <- token:
-		return nil
-	default:
-		return errors.New("此验证请求已提交")
-	}
 }

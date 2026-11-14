@@ -6,7 +6,6 @@ import (
 	"errors"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/aBon579/free-model-house/internal/credit"
@@ -31,20 +30,15 @@ import (
 //	而一次领取要「拉活动清单 → 逐个领取 → 复查余额」，一次导入要「每个账号
 //	都验凭据 + 拉清单」。没有整体上限的话，管理台点一下可能挂住几分钟。
 const (
-	creditReadTimeout    = 15 * time.Second
-	creditCallTimeout    = time.Minute
-	creditActionTimeout  = 3 * time.Minute
-	creditImportTimeout  = 5 * time.Minute
-	creditBodyLimit      = 4 << 20
-	creditCaptchaTTL     = 3 * time.Minute
-	creditCaptchaMaxKeep = 32
+	creditReadTimeout   = 15 * time.Second
+	creditCallTimeout   = time.Minute
+	creditActionTimeout = 3 * time.Minute
+	creditImportTimeout = 5 * time.Minute
+	creditBodyLimit     = 4 << 20
 )
 
 // SetCredit 装上 Credit 账号管理器。
-func (a *Admin) SetCredit(m *credit.Manager) {
-	a.credit = m
-	a.creditCaptcha = &creditCaptchaStage{tokens: map[string]stagedCaptcha{}}
-}
+func (a *Admin) SetCredit(m *credit.Manager) { a.credit = m }
 
 // handleCredit 分发 `/api/credit` 下的所有路径。
 func (a *Admin) handleCredit(w http.ResponseWriter, r *http.Request) {
@@ -187,13 +181,6 @@ func (a *Admin) handleCredit(w http.ResponseWriter, r *http.Request) {
 			"version":  1,
 			"accounts": accounts,
 		})
-	case "/captcha":
-		a.handleCreditCaptcha(w, r, m)
-	case "/captcha/requests":
-		if !creditGet(w, r) {
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"requests": m.CaptchaRequests()})
 	default:
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "not found"})
 	}
@@ -238,9 +225,7 @@ func (a *Admin) handleCreditAction(w http.ResponseWriter, r *http.Request, m *cr
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "credits": credits})
 	case "claim":
-		// ⚠️ 验证码参数**只在这里**被取走：一次性，取到就用在这次领取上。
-		captcha := a.creditCaptcha.take(body.ID)
-		results, err := m.Claim(ctx, body.ID, body.CampaignID, captcha)
+		results, err := m.Claim(ctx, body.ID, body.CampaignID)
 		if err != nil {
 			writeCreditError(w, err)
 			return
@@ -406,100 +391,6 @@ func (a *Admin) handleCreditLogin(w http.ResponseWriter, r *http.Request, m *cre
 	writeJSON(w, http.StatusOK, login)
 }
 
-// handleCreditCaptcha 收浏览器里真实产出的验证码参数。
-func (a *Admin) handleCreditCaptcha(w http.ResponseWriter, r *http.Request, m *credit.Manager) {
-	if r.Method == http.MethodGet {
-		id := r.URL.Query().Get("id")
-		if id == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "缺少 id"})
-			return
-		}
-		ctx, cancel := context.WithTimeout(r.Context(), creditReadTimeout)
-		defer cancel()
-		cfg, err := m.CaptchaConfig(ctx, id)
-		if err != nil {
-			writeCreditError(w, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, cfg)
-		return
-	}
-	var body struct {
-		ID                 string `json:"id"`
-		RequestID          string `json:"requestId"`
-		CaptchaVerifyParam string `json:"captchaVerifyParam"`
-	}
-	if !creditPost(w, r, &body) {
-		return
-	}
-	if body.ID == "" || strings.TrimSpace(body.CaptchaVerifyParam) == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "缺少账户或验证码参数"})
-		return
-	}
-	// 有 requestId = 后台确实有一次请求正在等这个参数，直接叫醒它。
-	if body.RequestID != "" {
-		if err := m.SubmitCaptcha(body.ID, body.RequestID, body.CaptchaVerifyParam); err != nil {
-			writeCreditError(w, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-		return
-	}
-	// 没有 requestId = 页面先提交验证码、随后再发那一次操作。
-	// ⚠️ 只暂存，绝不落日志、绝不回显：它等价于一次登录态凭证。
-	if !a.creditCaptcha.put(body.ID, body.CaptchaVerifyParam) {
-		writeJSON(w, http.StatusTooManyRequests, map[string]any{
-			"error": "待处理的验证码太多，请关闭其他验证窗口后重试",
-		})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
-// stagedCaptcha 是一条待用的验证码参数。
-type stagedCaptcha struct {
-	token   string
-	expires int64
-}
-
-// creditCaptchaStage 暂存「刚在浏览器里真实产出、还没被用上」的验证码参数。
-type creditCaptchaStage struct {
-	mu     sync.Mutex
-	tokens map[string]stagedCaptcha
-}
-
-// put 暂存一个参数；容量不够时先清过期的，仍然不够就拒绝（调用方会重走验证）。
-func (s *creditCaptchaStage) put(accountID, token string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	now := time.Now().UnixMilli()
-	for id, item := range s.tokens {
-		if item.expires <= now {
-			delete(s.tokens, id)
-		}
-	}
-	if len(s.tokens) >= creditCaptchaMaxKeep {
-		return false
-	}
-	s.tokens[accountID] = stagedCaptcha{token: token, expires: now + creditCaptchaTTL.Milliseconds()}
-	return true
-}
-
-// take 取走并删除 —— 一个参数只够一次操作。
-func (s *creditCaptchaStage) take(accountID string) string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	item, ok := s.tokens[accountID]
-	if !ok {
-		return ""
-	}
-	delete(s.tokens, accountID)
-	if item.expires <= time.Now().UnixMilli() {
-		return ""
-	}
-	return item.token
-}
-
 // creditGet 校验 GET 方法。
 func creditGet(w http.ResponseWriter, r *http.Request) bool {
 	if r.Method != http.MethodGet {
@@ -524,9 +415,10 @@ func creditPost(w http.ResponseWriter, r *http.Request, target any) bool {
 
 // writeCreditError 把 credit 层的错误翻译成页面能用的形态。
 //
-// ⚠️ `code` 是**协议的一部分**：页面靠 `captcha_required` 决定
+// ⚠️ `code` 是上游自己的**机器可读判决**，原样透出而不是只留一句中文：
 //
-//	「弹官方验证码」而不是「报一次失败」。丢掉它，ZCode 的领取就再也走不完。
+//	TRAE 用它标 `token_expired`（刷一次凭据能救）区别于普通 401（得重新登录）。
+//	页面目前按文案走，但这个字段是给"下一步该做什么"用的 —— 吞掉就再也分不出来。
 func writeCreditError(w http.ResponseWriter, err error) {
 	var ae *credit.APIError
 	if errors.As(err, &ae) {
