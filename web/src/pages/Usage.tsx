@@ -227,7 +227,7 @@ export function Usage() {
                           ) : null}
                         </td>
                         <td className="px-3 py-2">
-                          <LaneBadge lane={m.lane as 'zen' | 'openrouter' | 'kilo' | 'custom'} />
+                          <LaneBadge lane={m.lane as 'zen' | 'openrouter' | 'kilo' | 'custom' | 'credit'} />
                         </td>
                         <td className="px-3 py-2">
                           <span className="whitespace-nowrap text-[12px] text-[var(--ink-2)]">

@@ -15,6 +15,7 @@ import {
   Settings as SettingsIcon,
   Sun,
   Waypoints,
+  Wallet,
   X,
 } from 'lucide-react'
 import { Badge, Button, cn } from './ui'
@@ -28,6 +29,7 @@ export type RouteKey =
   | 'usage'
   | 'logs'
   | 'sources'
+  | 'credit'
   | 'access'
   | 'proxy'
   | 'settings'
@@ -56,6 +58,7 @@ const navItems: NavItem[] = [
   //   每个类目可以单独开关。
   { key: 'logs', label: '日志', icon: ScrollText, group: '运行' },
   { key: 'sources', label: '上游源', icon: Waypoints, group: '运行' },
+  { key: 'credit', label: 'Credit', icon: Wallet, group: '运行' },
   // ⚠️ **Key Hub 是"给谁、给多少"的运行服务设置** —— 运行组；
   //   **出口代理是网络层配置** —— 系统组。
   { key: 'access', label: 'Key Hub', icon: KeyRound, group: '运行' },

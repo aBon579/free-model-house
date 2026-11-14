@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aBon579/free-model-house/internal/credit"
 	"github.com/aBon579/free-model-house/internal/lane"
 	"github.com/aBon579/free-model-house/internal/loghub"
 	"github.com/aBon579/free-model-house/internal/store"
@@ -57,6 +58,10 @@ type Admin struct {
 	logger *log.Logger
 	// loghub 是分类运行日志（可为 nil）。
 	loghub *loghub.Hub
+	// credit 是 Credit 页的账号管理器（可为 nil = 未启用）。
+	credit *credit.Manager
+	// creditCaptcha 暂存浏览器刚产出的官方验证码参数（随 credit 一起装）。
+	creditCaptcha *creditCaptchaStage
 }
 
 // SetEgress 装上出口探测器。
@@ -191,6 +196,13 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 			"error": "未登录",
 			"hint":  "管理面只能在 NAS 本机浏览器访问",
 		})
+		return
+	}
+
+	// ⚠️ Credit 是**前缀**路由（/credit、/credit/accounts…），
+	//   子路径的分发在 credit.go 里。
+	if path == "/credit" || strings.HasPrefix(path, "/credit/") {
+		a.handleCredit(w, r)
 		return
 	}
 
@@ -507,6 +519,10 @@ func (a *Admin) handleModels(w http.ResponseWriter, r *http.Request) {
 			"efforts":    m.Efforts,
 			"state":      m.State,
 			"ttftMs":     m.TTFTMs,
+		}
+		if m.Multiplier != nil {
+			// 缺字段 = 上游没说；给一个 0 会被界面读成"免费"。
+			entry["multiplier"] = *m.Multiplier
 		}
 		if m.CanDisableThinking {
 			entry["canDisableThinking"] = true

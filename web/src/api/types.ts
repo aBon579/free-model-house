@@ -5,7 +5,7 @@
 // 但这个代价是**显式**的，TypeScript 会在编译时抓到不匹配。
 
 /** 车道 id。 */
-export type LaneID = 'zen' | 'openrouter' | 'kilo' | 'custom'
+export type LaneID = 'zen' | 'openrouter' | 'kilo' | 'custom' | 'credit'
 
 /**
  * 模型状态。
@@ -32,6 +32,13 @@ export interface ModelInfo {
   lane: LaneID
   name: string
   free: boolean
+  /**
+   * 上游报的**额度倍率**。
+   *
+   * ⚠️ 缺失 = 上游没说，**不等于 0**。
+   * 只有 credit 车道的账号池会带它（0× 的真免费模型与 1.4× 的计费模型靠它区分）。
+   */
+  multiplier?: number
   enabled: boolean
   /** 上游协议线。 */
   wire: 'chat' | 'responses' | 'messages'

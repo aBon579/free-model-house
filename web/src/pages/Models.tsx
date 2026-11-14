@@ -89,7 +89,7 @@ export function Models() {
     else toast.bad('探测中断')
   })
   const [query, setQuery] = useState('')
-  const [laneFilter, setLaneFilter] = useState<'all' | 'zen' | 'kilo' | 'openrouter' | 'custom'>('all')
+  const [laneFilter, setLaneFilter] = useState<'all' | 'zen' | 'kilo' | 'openrouter' | 'custom' | 'credit'>('all')
   const [stateFilter, setStateFilter] = useState<ModelState | 'all'>('all')
   const [capFilter, setCapFilter] = useState<(typeof capabilityFilters)[number]['key']>('all')
 
@@ -335,6 +335,7 @@ export function Models() {
             <option value="kilo">Kilo 免 key 池</option>
             <option value="openrouter">OpenRouter</option>
             <option value="custom">自定义 Key 池</option>
+            <option value="credit">Credit 账户池</option>
           </Select>
           <Select
             value={stateFilter}
@@ -503,6 +504,24 @@ function ModelRow({
           label="思"
           known={m.capability !== 'unknown'}
         />
+        {/* ⚠️ 「免费」= **这次推理不扣额度**，不是"来自某条免费车道"。
+            credit 池子里 0× 与 1.4× 的模型并存，只有倍率能把它们分开；
+            上游没报倍率时**不打标记**——猜一个 0 等于把计费模型说成免费。 */}
+        {m.free ? (
+          <span
+            className="inline-flex h-[17px] items-center rounded-[3px] border border-[var(--ok-line)] bg-[var(--ok-soft)] px-1 text-[10px] font-medium leading-none text-[var(--ok)]"
+            title={m.multiplier === 0 ? '上游额度倍率 0×：不扣额度' : '免费车道模型'}
+          >
+            免费
+          </span>
+        ) : m.multiplier != null ? (
+          <span
+            className="tnum inline-flex h-[17px] items-center rounded-[3px] border border-[var(--line)] px-1 text-[10px] leading-none text-[var(--ink-3)]"
+            title={`上游额度倍率 ${m.multiplier}×：花账号额度`}
+          >
+            {m.multiplier}×
+          </span>
+        ) : null}
         {m.context > 0 ? (
           <span className="tnum text-[11px] text-[var(--ink-3)]">
             {formatContext(m.context)}

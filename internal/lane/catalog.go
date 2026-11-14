@@ -64,6 +64,15 @@ type ModelInfo struct {
 	// EffortDefault 是它的默认档位。
 	EffortDefault string `json:"effortDefault,omitempty"`
 
+	// Multiplier 是上游报的**额度倍率**（credit 车道用它把 0× 的真免费模型
+	// 与 1.4× 的付费模型分开 —— 光靠 `Free` 一个布尔做不到）。
+	//
+	// ⚠️ `nil` 是"上游没说"，**不等于 0**。ZCode 的 coding-plan 模型就显式
+	//
+	//	置 nil：按免费额度计费的模型并不存在一个"订阅价"可以填进来。
+	//	把它当 0 会让一个计费模型在界面上显示成"免费"。
+	Multiplier *float64 `json:"multiplier,omitempty"`
+
 	// Capability 是能力结论的来源。
 	Capability CapabilitySource `json:"capability"`
 

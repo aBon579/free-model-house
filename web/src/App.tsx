@@ -23,9 +23,10 @@ import { Sources } from './pages/Sources'
 import { Proxy } from './pages/Proxy'
 import { Access } from './pages/Access'
 import { Settings } from './pages/Settings'
+import { Credit } from './pages/Credit'
 
 /** 路由表。 */
-const routes: RouteKey[] = ['quickstart', 'models', 'usage', 'logs', 'sources', 'access', 'proxy', 'settings']
+const routes: RouteKey[] = ['quickstart', 'models', 'usage', 'logs', 'sources', 'credit', 'access', 'proxy', 'settings']
 
 /** 密码最少几位（必须与后端一致）。 */
 const MIN_PASSWORD_LEN = 8
@@ -111,6 +112,7 @@ function App() {
       {route === 'usage' ? <Usage /> : null}
       {route === 'logs' ? <Logs /> : null}
       {route === 'sources' ? <Sources /> : null}
+      {route === 'credit' ? <Credit /> : null}
       {route === 'access' ? <Access /> : null}
       {route === 'proxy' ? <Proxy /> : null}
       {route === 'settings' ? <Settings /> : null}

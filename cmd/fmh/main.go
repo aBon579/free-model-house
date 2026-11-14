@@ -26,6 +26,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aBon579/free-model-house/internal/credit"
+	"github.com/aBon579/free-model-house/internal/creditlane"
 	"github.com/aBon579/free-model-house/internal/lane"
 	"github.com/aBon579/free-model-house/internal/loghub"
 	"github.com/aBon579/free-model-house/internal/server"
@@ -199,6 +201,36 @@ func run(addr, dataDir string, logger *log.Logger) error {
 		}
 	}
 
+	// ⚠️ **Credit 车道**（用户自己的 Qoder / TRAE / ZCode 账号）。
+	//
+	//   凭据跟其它上游 Key 一样经 vault 密封后落库，页面只显示指纹。
+	//   建不起来只让 Credit 页报「未启用」，不该拖垮整个启动流程。
+	//
+	//   ⚠️ 必须在**代理配置之后**建 —— Manager 的 http.Client 抓的是当时那份
+	//   transport，早于代理就永远走直连（用户配了代理却发现 Credit 调用不通）。
+	//   也必须在**车道开关登记之前**注册，否则界面上没有这条车道的开关。
+	var creditMgr *credit.Manager
+	if m, err := credit.NewManager(db, vault, lane.Transport()); err != nil {
+		logger.Printf("Credit 服务初始化失败（管理台 Credit 页不可用）: %v", err)
+	} else {
+		creditMgr = m
+		creditLane := creditlane.New(creditMgr)
+		registry.Register(creditLane)
+
+		// ⚠️ **账号一变，模型池立刻跟着变** ——
+		//
+		//   清单本来 30 分钟才刷一轮。用户刚登录完一个账号，
+		//   `/v1/models` 里还是没有它的模型，只会以为这功能没做。
+		//   先摘掉这条车道的旧行再合并，账号删掉的模型才会**真的消失**
+		//   （只 Merge 的话，删掉的模型会一直挂在池子里等着被路由选中）。
+		creditMgr.SetChangeHook(func() {
+			catalog.RemoveLane(creditlane.LaneID)
+			models, _ := creditLane.ListModels(context.Background())
+			catalog.Merge(models)
+			applyToggles(catalog, db)
+		})
+	}
+
 	// ⚠️ **车道开关** —— 哪条车道开不开。
 	//
 	// 关掉的车道的模型仍然显示在清单里，但**不进候选链**。
@@ -238,6 +270,10 @@ func run(addr, dataDir string, logger *log.Logger) error {
 	admin.SetProxy(proxy)
 	// ⚠️ **管理台密码** —— 初始 `admin`，首次登录后强制改。
 	admin.SetPassword(password)
+
+	// ⚠️ **Credit 页面** —— 管理器在上面已经建好（车道要它，注册要它）。
+	//   没建起来时传 nil，页面自己报「未启用」。
+	admin.SetCredit(creditMgr)
 
 	srv := server.NewServer(server.Options{
 		Addr:    addr,
@@ -363,6 +399,12 @@ func run(addr, dataDir string, logger *log.Logger) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go background(ctx, logger, db, vault, registry, catalog, router, admin)
+
+	// ⚠️ **自动签到循环总是启动** —— 开不开由管理器自己按用户显式设置的开关判断，
+	//   这样在页面上打开它不用重启（跟探测调度器同一个道理）。
+	if creditMgr != nil {
+		go creditMgr.Run(ctx)
+	}
 
 	// ⚠️ 启动自动探测（**总是启动**）——
 	//   开关由调度器自己判断（`SetEnabled`），这样在管理台关掉/打开能**立即生效**，

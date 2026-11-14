@@ -216,6 +216,13 @@
   --lane-kilo-soft: #e6fbf7;
   --lane-kilo-line: #b5e8df;
 
+  /* ⚠️ credit 是**第四条**车道 —— Credit 页登录的账号，不是免密池。
+     用**玫红**：蓝 / 紫 / 青绿都被免密池占了，
+     amber 会跟主色（强调按钮）撞，红色又像报错。 */
+  --lane-credit: #be185c;
+  --lane-credit-soft: #fdeaf2;
+  --lane-credit-line: #f8cfe1;
+
   /* ── 形状 ───────────────────────────────────────────────────────────── */
   --r-sm: 6px;
   --r-md: 10px;
@@ -333,6 +340,10 @@
   --lane-kilo: #5eead4;          /* 青绿：Kilo 免 key 池 */
   --lane-kilo-soft: #0a2b28;
   --lane-kilo-line: #17564f;
+
+  --lane-credit: #f9a8d4;         /* 玫红：Credit 凭据车道 */
+  --lane-credit-soft: #331024;
+  --lane-credit-line: #6b1f45;
 }
 
 /* Tailwind 主题映射 —— 让 Tailwind 类能用这些令牌 */

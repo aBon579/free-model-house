@@ -216,6 +216,11 @@ func (g *Gateway) serveModels(w http.ResponseWriter, r *http.Request) {
 		if m.Name != "" {
 			entry["name"] = m.Name
 		}
+		// 上游报了额度倍率才给 —— 缺字段是"上游没说"，
+		// 报一个 0 等于把未知说成免费。
+		if m.Multiplier != nil {
+			entry["multiplier"] = *m.Multiplier
+		}
 		if m.ContextWindow > 0 {
 			entry["context_window"] = m.ContextWindow
 		}

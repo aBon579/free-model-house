@@ -4,6 +4,7 @@ go 1.26.0
 
 require (
 	github.com/ncruces/go-sqlite3 v0.35.6
+	github.com/tetratelabs/wazero v1.9.0
 	golang.org/x/crypto v0.57.0
 )
 
