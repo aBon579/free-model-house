@@ -25,9 +25,13 @@ type Account struct {
 	DisabledModels []string `json:"disabledModels"`
 	Effort         string   `json:"effort"`
 	MaxMode        bool     `json:"maxMode"`
-	Credits        *Credits `json:"credits,omitempty"`
-	Error          string   `json:"error,omitempty"`
-	CooldownUntil  int64    `json:"cooldownUntil,omitempty"`
+	// AutoClaimAt 是 UTC+8 的每日领取时刻（"HH:MM"），空 = 该账号不自动领取。
+	// 旧版是一个"全部渠道"总开关，没有"什么时候领"的概念；每个上游的刷新点不同，
+	// 所以时刻必须落在账号上。
+	AutoClaimAt   string   `json:"autoClaimAt,omitempty"`
+	Credits       *Credits `json:"credits,omitempty"`
+	Error         string   `json:"error,omitempty"`
+	CooldownUntil int64    `json:"cooldownUntil,omitempty"`
 }
 
 type storedAccount struct {
@@ -38,8 +42,10 @@ type storedAccount struct {
 
 type state struct {
 	Accounts      []storedAccount   `json:"accounts"`
-	AutoClaim     bool              `json:"autoClaim"`
 	LastAutoClaim map[string]string `json:"lastAutoClaim"`
+	// LegacyAutoClaim 只为装载旧状态而存在：migrateAutoClaim 把它落成每账号的时刻
+	// 后立刻写回 false，omitempty 让这个键从此消失。调度路径不读它。
+	LegacyAutoClaim bool `json:"autoClaim,omitempty"`
 }
 
 type Provider struct {
@@ -52,7 +58,6 @@ type Provider struct {
 type Snapshot struct {
 	Providers []Provider `json:"providers"`
 	Accounts  []Account  `json:"accounts"`
-	AutoClaim bool       `json:"autoClaim"`
 }
 
 type AccountPatch struct {
@@ -62,6 +67,7 @@ type AccountPatch struct {
 	DisabledModels *[]string `json:"disabledModels"`
 	Effort         *string   `json:"effort"`
 	MaxMode        *bool     `json:"maxMode"`
+	AutoClaimAt    *string   `json:"autoClaimAt"`
 	Move           string    `json:"move"`
 }
 
@@ -73,6 +79,7 @@ type BackupAccount struct {
 	DisabledModels []string   `json:"disabledModels,omitempty"`
 	Effort         string     `json:"effort,omitempty"`
 	MaxMode        bool       `json:"maxMode,omitempty"`
+	AutoClaimAt    string     `json:"autoClaimAt,omitempty"`
 }
 
 type loginJob struct {
@@ -122,7 +129,93 @@ func NewManager(db *store.DB, vault *store.Vault, client *http.Client) (*Manager
 		return nil, err
 	}
 	m.obsolete = dropped
+	if err := m.migrateAutoClaim(); err != nil {
+		return nil, err
+	}
 	return m, nil
+}
+
+// migrateAutoClaim 把旧版"全部渠道"总开关落成每账号的领取时刻。
+//
+// 旧语义是"开着就每天进程醒来后的第一分钟全池一起领"——既没得选时间，也让
+// Qoder（10:00 才刷新）和 TRAE 共用同一个时刻。迁移按渠道填保守默认值，
+// 行为等价但不再挤在同一分钟，而且从此可以逐个账号改或关。
+// 只在旧 bool 为 true 时执行一次，之后这个键就消失了。
+func (m *Manager) migrateAutoClaim() error {
+	if !m.state.LegacyAutoClaim {
+		return nil
+	}
+	next := m.copyLocked()
+	for i := range next.Accounts {
+		if next.Accounts[i].AutoClaimAt == "" {
+			next.Accounts[i].AutoClaimAt = defaultAutoClaimAt(next.Accounts[i].Provider)
+		}
+	}
+	next.LegacyAutoClaim = false
+	return m.saveLocked(next)
+}
+
+// defaultAutoClaimAt 是旧开关迁移用的时刻：错开刷新点几分钟，避开整点那一分钟。
+func defaultAutoClaimAt(provider string) string {
+	if provider == "qoder" || provider == "qodercn" {
+		return "10:05"
+	}
+	return "00:05"
+}
+
+// autoClaimFloor 是该渠道每天最早的可领取时刻（UTC+8），空串表示没有下限。
+// Qoder 的每日领取活动原文写着「每日 10:00（UTC+8）刷新」，早于它去领只会换来
+// 一次失败，而当天又不会重试——所以这个下限在保存时就拒绝，而不是运行时无声跳过。
+func autoClaimFloor(provider string) string {
+	if provider == "qoder" || provider == "qodercn" {
+		return "10:00"
+	}
+	return ""
+}
+
+// validateAutoClaimAt 是时刻的**唯一**判入口：格式 + 该渠道的刷新下限。
+//
+// 设置和导入都要过它 —— 备份文件是用户手边的文本，改一个数字就能把
+// "10 点才刷新却 9 点去领"带进来，而那天只会领一次、失败也不再重试。
+func validateAutoClaimAt(provider, value string) error {
+	minute, off, err := parseAutoClaimAt(value)
+	if err != nil || off {
+		return err
+	}
+	floor := autoClaimFloor(provider)
+	if floor == "" {
+		return nil
+	}
+	limit, _, _ := parseAutoClaimAt(floor)
+	if minute < limit {
+		return fmt.Errorf("该渠道每日 %s 才刷新领取，时间不能设得更早", floor)
+	}
+	return nil
+}
+
+// autoClaimDue 判断这个账号今天是否该自动领取：时刻写得有效、已经到点、今天还没试过。
+//
+// 时间写坏只在旧数据里可能出现（Patch 会拒绝），当作"没开"处理而不是报错——
+// 调度循环里抛错会让整池账号当天都领不了。
+func autoClaimDue(value, last, today string, minuteNow int) bool {
+	if last == today {
+		return false
+	}
+	at, off, err := parseAutoClaimAt(value)
+	return err == nil && !off && minuteNow >= at
+}
+
+// parseAutoClaimAt 把 "HH:MM" 换成当天分钟数；空串走 off=true。
+// 用 time.Parse 而不是自己切字符串：它顺带把 "9:5"、"24:00" 这类写法挡掉。
+func parseAutoClaimAt(value string) (minute int, off bool, err error) {
+	if value == "" {
+		return 0, true, nil
+	}
+	t, err := time.Parse("15:04", value)
+	if err != nil {
+		return 0, false, errors.New("自动领取时间要写成 HH:MM（24 小时制），留空表示关闭")
+	}
+	return t.Hour()*60 + t.Minute(), false, nil
 }
 
 // dropUnknownProviders 清掉提供方已经没有适配器的账号，返回被清掉的账号（供启动日志用）。
@@ -208,7 +301,7 @@ func (m *Manager) Snapshot() Snapshot {
 	m.mu.RLock()
 	s := m.copyLocked()
 	m.mu.RUnlock()
-	out := Snapshot{Accounts: []Account{}, Providers: []Provider{}, AutoClaim: s.AutoClaim}
+	out := Snapshot{Accounts: []Account{}, Providers: []Provider{}}
 	for _, p := range []Provider{{ID: "qoder", Name: "Qoder", LoginModes: []string{"default"}}, {ID: "qodercn", Name: "Qoder 中国版", LoginModes: []string{"default"}}, {ID: "trae", Name: "TRAE", LoginModes: []string{"default"}}} {
 		p.Models = []Model{}
 		seen := map[string]bool{}
@@ -426,6 +519,14 @@ func (m *Manager) Patch(p AccountPatch) error {
 	}
 	if p.MaxMode != nil {
 		a.MaxMode = *p.MaxMode
+	}
+	if p.AutoClaimAt != nil {
+		value := strings.TrimSpace(*p.AutoClaimAt)
+		if err := validateAutoClaimAt(a.Provider, value); err != nil {
+			m.mu.Unlock()
+			return err
+		}
+		a.AutoClaimAt = value
 	}
 	if p.Move != "" {
 		switch p.Move {
@@ -733,14 +834,6 @@ func (m *Manager) Prepare(ctx context.Context, id string, in Inference) (Prepare
 
 func (m *Manager) HTTPClient() *http.Client { return m.client }
 
-func (m *Manager) SetAutoClaim(enabled bool) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	s := m.copyLocked()
-	s.AutoClaim = enabled
-	return m.saveLocked(s)
-}
-
 func (m *Manager) Run(ctx context.Context) {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
@@ -763,30 +856,25 @@ func (m *Manager) autoClaim(ctx context.Context) {
 	m.mu.RLock()
 	s := m.copyLocked()
 	m.mu.RUnlock()
-	if !s.AutoClaim {
-		return
-	}
 	now := time.Now().In(time.FixedZone("UTC+8", 8*3600))
 	day := now.Format("2006-01-02")
+	minuteNow := now.Hour()*60 + now.Minute()
 	for _, a := range s.Accounts {
 		if ctx.Err() != nil {
 			return
 		}
-		if s.LastAutoClaim[a.ID] == day {
-			continue
-		}
-		if (a.Provider == "qoder" || a.Provider == "qodercn") && now.Hour() < 10 {
+		if !autoClaimDue(a.AutoClaimAt, s.LastAutoClaim[a.ID], day, minuteNow) {
 			continue
 		}
 		// 一天一次自动尝试；失败留给手动重试，避免反复触发领取风控。
 		m.mu.Lock()
 		next := m.copyLocked()
 		next.LastAutoClaim[a.ID] = day
-		err := m.saveLocked(next)
-		m.mu.Unlock()
-		if err != nil {
+		if err := m.saveLocked(next); err != nil {
+			m.mu.Unlock()
 			return
 		}
+		m.mu.Unlock()
 		jobCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 		_, _ = m.Claim(jobCtx, a.ID, "")
 		cancel()
@@ -800,7 +888,7 @@ func (m *Manager) Export() []BackupAccount {
 	out := []BackupAccount{}
 	for _, a := range s.Accounts {
 		enabled := a.Enabled
-		out = append(out, BackupAccount{Provider: a.Provider, Name: a.Name, Credential: a.Credential, Enabled: &enabled, DisabledModels: a.DisabledModels, Effort: a.Effort, MaxMode: a.MaxMode})
+		out = append(out, BackupAccount{Provider: a.Provider, Name: a.Name, Credential: a.Credential, Enabled: &enabled, DisabledModels: a.DisabledModels, Effort: a.Effort, MaxMode: a.MaxMode, AutoClaimAt: a.AutoClaimAt})
 	}
 	return out
 }
@@ -817,6 +905,11 @@ func (m *Manager) Import(ctx context.Context, items []BackupAccount) (int, error
 		if err := a.Validate(normalizeCredential(item.Credential)); err != nil {
 			return 0, err
 		}
+		// ⚠️ 时刻要在**一个账号都还没落盘之前**判掉：导入是逐个写的，
+		//   第 30 个才发现时间填早了，前 29 个已经进来了，而错误里只说第 30 个。
+		if err := validateAutoClaimAt(item.Provider, strings.TrimSpace(item.AutoClaimAt)); err != nil {
+			return 0, fmt.Errorf("账号「%s」的自动领取时间无效：%w", item.Name, err)
+		}
 	}
 	count := 0
 	for _, item := range items {
@@ -826,6 +919,9 @@ func (m *Manager) Import(ctx context.Context, items []BackupAccount) (int, error
 		}
 		count++
 		patch := AccountPatch{ID: a.ID, Enabled: item.Enabled, MaxMode: &item.MaxMode}
+		// 旧备份没有这个键 → 空串 → 该账号不自动领，和升级前的行为一致。
+		autoClaimAt := strings.TrimSpace(item.AutoClaimAt)
+		patch.AutoClaimAt = &autoClaimAt
 		if item.Effort != "" {
 			patch.Effort = &item.Effort
 		}

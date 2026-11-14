@@ -33,6 +33,8 @@ export interface Account {
   disabledModels: string[]
   effort: string
   maxMode: boolean
+  // 每日自动领取时刻（UTC+8，"HH:MM"）；缺省或空串 = 该账号不自动领取。
+  autoClaimAt?: string
   credits?: Credits
   error?: string
   cooldownUntil?: number
@@ -48,7 +50,6 @@ export interface Provider {
 export interface CreditState {
   providers: Provider[]
   accounts: Account[]
-  autoClaim: boolean
 }
 
 export interface Login {
@@ -69,6 +70,7 @@ export interface AccountUpdate {
   disabledModels?: string[]
   effort?: string
   maxMode?: boolean
+  autoClaimAt?: string
   move?: 'up' | 'down'
 }
 
@@ -141,7 +143,6 @@ export const creditApi = {
   update: (body: AccountUpdate) => request<{ ok: boolean }>('/accounts/update', body),
   delete: (id: string) => request<{ ok: boolean }>('/accounts/delete', { id }),
   action: (body: AccountAction) => request<ActionResult>('/accounts/action', body),
-  settings: (autoClaim: boolean) => request<{ ok: boolean }>('/settings', { autoClaim }),
   login: (body: { provider: ProviderId; mode?: string; accountId?: string }) => request<Login>('/login', body),
   loginStatus: (id: string, signal?: AbortSignal) => request<Login>(`/login?id=${encodeURIComponent(id)}`, undefined, signal),
   // TRAE 是手动那条：后端刻意**不轮询**它（轮询要 NAS 监听自己的 localhost），

@@ -172,6 +172,10 @@ function AccountSettings({ account, models, onClose, onSave }: { account: Accoun
   const [disabled, setDisabled] = useState(account.disabledModels)
   const [effort, setEffort] = useState(account.effort)
   const [maxMode, setMaxMode] = useState(account.maxMode)
+  const [autoClaimAt, setAutoClaimAt] = useState(account.autoClaimAt ?? '')
+  // Qoder 的每日领取活动原文写着「每日 10:00（UTC+8）刷新」，后端在保存时就拒绝更早的值，
+  // 这里提前把下限写进提示，免得用户点了保存才知道白填。
+  const claimFloor = account.provider === 'qoder' || account.provider === 'qodercn' ? '10:00' : ''
   const op = useOperation()
   const efforts = [...new Set([account.effort, ...models.flatMap(m => m.efforts ?? [])].filter(Boolean))]
   const missing = disabled.filter(id => !models.some(m => m.id === id))
@@ -191,8 +195,11 @@ function AccountSettings({ account, models, onClose, onSave }: { account: Accoun
         <Field label="推理强度 effort" hint="按模型支持的档位生效。"><Select className="w-full" value={effort} aria-label="推理强度 effort" disabled={op.busy} onChange={e => setEffort(e.target.value)}><option value="">默认</option>{efforts.map(value => <option key={value} value={value}>{value}</option>)}</Select></Field>
         <Field label="Max Mode" hint={supportsMax ? '可能提高额度消耗，仅支持的模型生效。' : '当前未发现支持此模式的模型。'}><Switch checked={maxMode} onChange={setMaxMode} label="启用 Max Mode" disabled={op.busy || (!supportsMax && !maxMode)} /></Field>
       </div>
+      <Field label="自动领取时间（UTC+8）" hint={claimFloor ? `每天到点领一次，失败当天不重试。该渠道 ${claimFloor} 之后才刷新，不能设得更早；留空表示关闭。` : '每天到点领一次，失败当天不重试；留空表示关闭。'}>
+        <Input type="time" className="w-full" value={autoClaimAt} aria-label="自动领取时间" disabled={op.busy} onChange={e => setAutoClaimAt(e.target.value)} />
+      </Field>
       {op.error && <ErrorNote>{op.error}</ErrorNote>}
-      <div className="flex justify-end gap-2"><Button disabled={op.busy} onClick={onClose}>取消</Button><Button variant="primary" disabled={op.busy || !name.trim()} onClick={() => void op.run(async () => { await onSave({ id: account.id, name: name.trim(), disabledModels: disabled, effort, maxMode }); onClose() })}>{op.busy && <Spinner />}保存设置</Button></div>
+      <div className="flex justify-end gap-2"><Button disabled={op.busy} onClick={onClose}>取消</Button><Button variant="primary" disabled={op.busy || !name.trim()} onClick={() => void op.run(async () => { await onSave({ id: account.id, name: name.trim(), disabledModels: disabled, effort, maxMode, autoClaimAt }); onClose() })}>{op.busy && <Spinner />}保存设置</Button></div>
     </Modal>
   )
 }
@@ -439,7 +446,6 @@ export function Credit() {
   const [batch, setBatch] = useState(false)
   const batchLock = useRef(false)
   const mounted = useRef(true)
-  const settings = useOperation()
   const data = query.data
   const accounts = data?.accounts ?? []
   const provider = data?.providers.find(p => p.id === providerId)
@@ -520,7 +526,7 @@ export function Credit() {
     <>
       <PageTitle title="Credit" description="管理你自己的账户、模型和额度。按渠道独立管理，不合并不同单位的余额。" actions={<><Button size="sm" onClick={() => setDialog({ kind: 'import' })}><Upload size={14} />导入</Button><Button size="sm" disabled={!accounts.length} onClick={() => setDialog({ kind: 'export' })}><Download size={14} />备份导出</Button></>} />
       <div className="space-y-4">
-        <Card><CardBody className="flex flex-wrap items-center justify-between gap-5"><div className="flex flex-wrap gap-8"><Stat label="已连接账户" value={data ? accounts.length : '未知'} hint="仅显示凭据指纹" /><Stat label="已启用" value={data ? accounts.filter(a => a.enabled).length : '未知'} hint="顺序决定渠道内优先级" /></div><div className="space-y-2"><div className="flex items-center justify-between gap-4"><span className="text-[13px] font-medium text-[var(--ink)]">自动签到（全部渠道）</span><Switch label="自动签到（全部渠道）" checked={data?.autoClaim ?? false} disabled={!data || settings.busy} onChange={value => void settings.run(async () => { const result = await creditApi.settings(value); if (!result.ok) throw new Error('自动签到设置未保存'); refresh(); toast.ok(value ? '自动签到已开启，到点按活动清单领取' : '自动签到已关闭') })} /></div><p className="max-w-xs text-[11.5px] text-[var(--ink-3)]">仅由你显式开启；到点只按活动清单领取，不会发送推理请求。</p>{settings.busy && <Spinner />}{settings.error && <ErrorNote>{settings.error}</ErrorNote>}</div></CardBody></Card>
+        <Card><CardBody className="flex flex-wrap items-center justify-between gap-5"><div className="flex flex-wrap gap-8"><Stat label="已连接账户" value={data ? accounts.length : '未知'} hint="仅显示凭据指纹" /><Stat label="已启用" value={data ? accounts.filter(a => a.enabled).length : '未知'} hint="顺序决定渠道内优先级" /><Stat label="已设自动领取" value={data ? accounts.filter(a => a.autoClaimAt).length : '未知'} hint="每个账号各一个时刻" /></div><p className="max-w-xs text-[11.5px] text-[var(--ink-3)]">自动领取在各账号的「设置」里填每日时刻（UTC+8），留空即不自动领。到点只按活动清单领取一次，失败当天不重试，也不会发送推理请求。</p></CardBody></Card>
         <div role="tablist" aria-label="Credit 渠道" className="grid grid-cols-2 gap-2 sm:grid-cols-3">{channels.map(item => <button key={item.id} id={`credit-tab-${item.id}`} role="tab" aria-controls={`credit-panel-${providerId}`} aria-selected={providerId === item.id} tabIndex={providerId === item.id ? 0 : -1} onKeyDown={e => { if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') { e.preventDefault(); const step = e.key === 'ArrowRight' ? 1 : channels.length - 1; const next = channels[(channels.findIndex(c => c.id === item.id) + step) % channels.length].id; setProviderId(next); document.getElementById(`credit-tab-${next}`)?.focus() } }} onClick={() => setProviderId(item.id)} className={cn('fmh-hoverable rounded-[var(--r-md)] border p-3 text-left transition-colors', providerId === item.id ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]' : 'border-[var(--line)] bg-[var(--surface)] text-[var(--ink-2)]')}><span className="flex items-center justify-between gap-2 text-[13.5px] font-semibold">{item.name}<Badge tone={providerId === item.id ? 'accent' : 'idle'}>{data ? accounts.filter(account => account.provider === item.id).length : '—'}</Badge></span><span className="mt-1 block text-[11.5px] text-[var(--ink-3)]">{item.description}</span></button>)}</div>
         {query.error && <ErrorNote>账户数据读取失败：{message(query.error)}{data ? '。以下为上次加载的数据。' : ''}<Button size="sm" className="ml-2" onClick={() => void query.refetch()}>重试</Button></ErrorNote>}
         <section role="tabpanel" id={`credit-panel-${providerId}`} aria-labelledby={`credit-tab-${providerId}`} className="space-y-3">
@@ -538,7 +544,7 @@ export function Credit() {
                 <div className="flex flex-wrap items-center gap-2"><Button size="sm" disabled={accountBusy} onClick={() => void runAction(account, { id: account.id, action: 'credits' })}><Wallet size={13} />查询余额</Button><Button size="sm" disabled={accountBusy} onClick={() => claim(account)}><Gift size={13} />单号签到</Button><Button size="sm" disabled={accountBusy} onClick={() => void runAction(account, { id: account.id, action: 'refresh' })}><KeyRound size={13} />刷新凭据</Button><Button size="sm" disabled={accountBusy} onClick={() => void runAction(account, { id: account.id, action: 'models' })}><RefreshCw size={13} />刷新模型</Button>{provider?.loginModes.length ? <Button size="sm" disabled={accountBusy} onClick={() => setDialog({ kind: 'login', provider, accountId: account.id })}>重新登录</Button> : null}<Button size="sm" variant="ghost" disabled={accountBusy} onClick={() => setDialog({ kind: 'test', account })}>手动测试（耗额度）</Button><Button size="sm" variant="ghost" disabled={accountBusy} onClick={() => setDialog({ kind: 'reset', account })}>重置状态</Button>{busyIds.has(account.id) && <Spinner />}</div>
                 {outcome && <div aria-live="polite" className="space-y-2"><Notice tone={outcome.state === 'error' ? 'bad' : outcome.state === 'ok' ? 'ok' : 'accent'}>{outcome.text}</Notice>{outcome.result?.results?.map((result, resultIndex) => <div key={`${result.id}-${resultIndex}`} className="flex flex-wrap items-center gap-2 text-[12px]"><Badge tone={result.claimed || result.alreadyClaimed ? 'ok' : 'bad'}>{result.alreadyClaimed ? '已领过' : result.claimed ? '领取成功' : '未领取'}</Badge><span>{result.name} · 数量 {quantity(result.amount)}</span><span className="text-[var(--ink-3)]">{result.message}</span></div>)}</div>}
                 <CreditBalances credits={account.credits} staleError={creditErrors[account.id]} busy={accountBusy} onClaim={campaignId => claim(account, campaignId)} />
-                <div className="flex flex-wrap gap-x-4 gap-y-1 border-t border-[var(--line)] pt-2 text-[11.5px] text-[var(--ink-3)]"><span>模型 {modelList(account).length || '未知'} · 禁用 {account.disabledModels.length}</span><span>effort：{account.effort || '默认'}</span><span>Max Mode：{account.maxMode ? '开启' : '关闭'}</span></div>
+                <div className="flex flex-wrap gap-x-4 gap-y-1 border-t border-[var(--line)] pt-2 text-[11.5px] text-[var(--ink-3)]"><span>模型 {modelList(account).length || '未知'} · 禁用 {account.disabledModels.length}</span><span>effort：{account.effort || '默认'}</span><span>Max Mode：{account.maxMode ? '开启' : '关闭'}</span><span>自动领取：{account.autoClaimAt || '关闭'}</span></div>
               </CardBody>
             </Card>
           })}

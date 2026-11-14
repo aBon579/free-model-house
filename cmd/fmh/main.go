@@ -407,8 +407,8 @@ func run(addr, dataDir string, logger *log.Logger) error {
 	defer cancel()
 	go background(ctx, logger, db, vault, registry, catalog, router, admin)
 
-	// ⚠️ **自动签到循环总是启动** —— 开不开由管理器自己按用户显式设置的开关判断，
-	//   这样在页面上打开它不用重启（跟探测调度器同一个道理）。
+	// ⚠️ **自动领取循环总是启动** —— 每个账号各自决定领不领（`autoClaimAt` 留空即关），
+	//   所以改时刻不用重启，新加的账号也立刻进排期（跟探测调度器同一个道理）。
 	if creditMgr != nil {
 		go creditMgr.Run(ctx)
 	}

@@ -254,6 +254,47 @@ func newCreditLaneAdmin(t *testing.T) (*Admin, *Server, string, *blockedTranspor
 	return admin, s, keys.NewSession("test"), transport
 }
 
+// TestCreditUpdateAutoClaimAt 验证每账号的领取时刻**在路由这一层**的三种结论：
+//
+// ⚠️ 早于渠道刷新点的时刻必须是**看得懂的 400**，不能是 502/500 那种
+//
+//	"服务器出错了" —— 页面上的错误文案直接来自这里，用户要能明白是时间填早了。
+func TestCreditUpdateAutoClaimAt(t *testing.T) {
+	_, s, session := newCreditAdmin(t, true)
+	rec := creditRequest(t, s, session, http.MethodPost, "/api/credit/accounts",
+		`{"provider":"qoder","name":"时刻用","credential":{"accessToken":"at-secret","uid":"uid-1","machineId":"mid-1"}}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("添加账户失败：%d %s", rec.Code, rec.Body.String())
+	}
+	id := decodeCredit(t, rec)["account"].(map[string]any)["id"].(string)
+
+	rec = creditRequest(t, s, session, http.MethodPost, "/api/credit/accounts/update",
+		`{"id":"`+id+`","autoClaimAt":"09:00"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("Qoder 10:00 前领不到，该拒绝并说清理由，实际 %d：%s", rec.Code, rec.Body.String())
+	}
+	if msg, _ := decodeCredit(t, rec)["error"].(string); msg == "" {
+		t.Error("拒绝要有能显示给用户的原因")
+	}
+
+	for _, value := range []string{"10:30", ""} {
+		rec = creditRequest(t, s, session, http.MethodPost, "/api/credit/accounts/update",
+			`{"id":"`+id+`","autoClaimAt":"`+value+`"}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("时刻 %q 该接受，实际 %d：%s", value, rec.Code, rec.Body.String())
+		}
+		rec = creditRequest(t, s, session, http.MethodGet, "/api/credit", "")
+		accounts, _ := decodeCredit(t, rec)["accounts"].([]any)
+		account, _ := accounts[0].(map[string]any)
+		if got, _ := account["autoClaimAt"].(string); got != value {
+			t.Fatalf("快照里的时刻 = %q，期望 %q", got, value)
+		}
+	}
+	if calls := s.admin.credit.HTTPClient().Transport.(*blockedTransport).calls.Load(); calls != 0 {
+		t.Fatalf("设置时刻不该碰上游，实际请求 %d 次", calls)
+	}
+}
+
 // TestCreditUnknownSubroute 验证拼错的子路径是 404 而不是被当成快照。
 func TestCreditUnknownSubroute(t *testing.T) {
 	_, s, session := newCreditAdmin(t, true)

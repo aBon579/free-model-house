@@ -56,19 +56,6 @@ func (a *Admin) handleCredit(w http.ResponseWriter, r *http.Request) {
 		}
 		// 快照只读内存里的账号状态；Qoder 的模型表是本地的，不发上游请求。
 		writeJSON(w, http.StatusOK, m.Snapshot())
-	case "/settings":
-		var body struct {
-			AutoClaim bool `json:"autoClaim"`
-		}
-		if !creditPost(w, r, &body) {
-			return
-		}
-		if err := m.SetAutoClaim(body.AutoClaim); err != nil {
-			writeCreditError(w, err)
-			return
-		}
-		a.logCredit("自动签到：%s", onOff(body.AutoClaim))
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	case "/accounts":
 		var body struct {
 			Provider   string            `json:"provider"`
@@ -95,6 +82,15 @@ func (a *Admin) handleCredit(w http.ResponseWriter, r *http.Request) {
 		if err := m.Patch(body); err != nil {
 			writeCreditError(w, err)
 			return
+		}
+		// 领取时刻是这项设置里唯一会"自己按时打上游"的字段，改动要留一行日志；
+		// 改名、禁用模型都是被动的，不值得占日志。
+		if body.AutoClaimAt != nil {
+			scheduled := *body.AutoClaimAt
+			if scheduled == "" {
+				scheduled = "已关闭"
+			}
+			a.logCredit("自动领取时间：%s", scheduled)
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	case "/accounts/delete":
@@ -454,12 +450,4 @@ func (a *Admin) logCredit(format string, args ...any) {
 		return
 	}
 	a.logf(format, args...)
-}
-
-// onOff 把布尔写成中文，日志里少一种歧义。
-func onOff(v bool) string {
-	if v {
-		return "已开启"
-	}
-	return "已关闭"
 }
