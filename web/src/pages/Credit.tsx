@@ -37,6 +37,9 @@ function quantity(value?: number) {
   return typeof value === 'number' && Number.isFinite(value) ? value.toLocaleString(undefined, { maximumFractionDigits: 6 }) : '未知'
 }
 
+// 每个渠道"上次为这一屏打过余额请求"的时刻，只在当前浏览器会话里有效。
+const balanceFreshAt = new Map<string, number>()
+
 // 领取分档的中文名。这些档位只影响自动领取，跟推理车道的 cooldownUntil 是两套开关。
 const claimHoldNames: Record<string, string> = { credential: '凭据失效', plan: '套餐上限', server: '上游异常', rate: '领取过快' }
 
@@ -473,6 +476,36 @@ export function Credit() {
     const timer = setInterval(() => tick(value => value + 1), 30_000)
     return () => { mounted.current = false; clearInterval(timer) }
   }, [])
+  // 进页面或切渠道标签时，把**当下这一屏**的余额主动打一发上游。
+  //
+  // 30 秒一次的轮询读的是 `/api/credit` 的内存快照，余额数字不会因为轮询变新 ——
+  // 不补这一发，页面上一直是"上次查询"那一刻的数。只刷当前渠道、按渠道 60 秒去重，
+  // 是为了让"标签页切出去再切回来"不至于变成一台常驻爬虫。
+  useEffect(() => {
+    if (!data) return
+    if (Date.now() - (balanceFreshAt.get(providerId) ?? 0) < 60_000) return
+    const targets = data.accounts.filter(account => account.provider === providerId && account.enabled)
+    if (!targets.length) return
+    balanceFreshAt.set(providerId, Date.now())
+    let cancelled = false
+    void (async () => {
+      for (const account of targets) {
+        if (cancelled || !mounted.current) return
+        try {
+          const result = await creditApi.action({ id: account.id, action: 'credits' })
+          if (cancelled || !mounted.current || !result.credits) continue
+          qc.setQueryData(['credit'], (previous: typeof data) => previous
+            ? { ...previous, accounts: previous.accounts.map(item => item.id === account.id ? { ...item, credits: result.credits } : item) }
+            : previous)
+          setCreditErrors(values => { const next = { ...values }; delete next[account.id]; return next })
+        } catch (e) {
+          if (!cancelled && mounted.current) setCreditErrors(values => ({ ...values, [account.id]: message(e) }))
+        }
+      }
+    })()
+    return () => { cancelled = true }
+    // 依赖里只写渠道和"数据到没到"：data 每 30 秒就是一个新对象，写进去这条就退化成常驻轮询。
+  }, [providerId, !!data])
   function refresh() {
     void qc.invalidateQueries({ queryKey: ['credit'] })
     void qc.invalidateQueries({ queryKey: ['models'] })
