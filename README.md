@@ -98,6 +98,7 @@ openrouter/deepseek/deepseek-chat-v3-0324:free
 - **自动跨模型调用** —— Kilo ↔ Zen 优先（不花钱），OpenRouter 需显式开启
 - **断流续写** —— 上游流断了把已产出内容接回去重试
 - **用量** —— 365 天热力图、按模型明细、最近调用置顶；只记元数据，不记提示词与回答
+- **Credit 账户与每日领取** —— Qoder / Qoder 中国版 / TRAE 账户的余额、资源包与活动领取，按渠道独立不合并。「每日签到」那对请求头是 Qoder 客户端在**你这台电脑**上算出来的，网关（跑在 NAS 上）拿不到，所以要在这台装有客户端的电脑上双击 `tools/qoder-machine-identity.cmd`，它默认在桌面生成 `qoder-machine-identity.json`（落在哪个目录以脚本打印的那行为准），再在 Credit 页「设备身份」里导入 —— 就一个文件，PowerShell 正文在它自己的下半段里，不用配别的
 
 ## 配置
 
