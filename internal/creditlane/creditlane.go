@@ -173,9 +173,9 @@ func modelInfo(providerName, provider string, m credit.Model) lane.ModelInfo {
 		Wire: "chat",
 		Name: providerName + " · " + name,
 		// ⚠️ `Free` 回到它的字面意思：**这一次推理不扣额度**。
-		//   以前整池 credit 一律给 true，于是 0× 的 Qwen3.8-Flash 和
-		//   1.4× 的 Kimi-K3 在模型池里长得一模一样 —— 而用户挑模型
-		//   正是按这个挑的，标错等于让他把付费模型当免费的烧。
+		//   整池一律给 true 会让 0× 的 Qwen3.8-Flash 和 1.4× 的 Kimi-K3
+		//   在模型池里长得一模一样 —— 而挑模型正是按这个挑的，
+		//   标错等于让人把付费模型当免费的烧。
 		//   上游没给倍率（nil）时**不猜**：宁可什么标记都不打。
 		Free:       m.Multiplier != nil && *m.Multiplier == 0,
 		Multiplier: m.Multiplier,

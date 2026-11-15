@@ -130,7 +130,7 @@ func TestRestrictToRequestedPrefersExactLane(t *testing.T) {
 	}
 }
 
-// **用户真实报障的模型名** —— 不是 `shared` 这种最短例子，
+// **真实形态的模型名** —— 不是 `shared` 这种最短例子，
 // 而是带 vendor 段与 `:free` 后缀的多段 id。
 const realModel = "nvidia/nemotron-3.5-content-safety:free"
 

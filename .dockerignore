@@ -25,3 +25,24 @@
 .idea/
 .vscode/
 .git/
+/.tmp
+
+# ── 本地才有的东西，一律别进构建上下文 ──
+#
+# Dockerfile 的 `COPY . .` 会拿走上下文里的**全部**文件（.gitignore 对它无效），
+# 而这几样是本机侦察记录 / 私有部署件 / 参考客户端源码：既没有构建依赖，
+# 也不该出现在任何人拉取构建的上下文里（多阶段构建只发布最后一层，
+# 但上下文仍会整份传给 daemon）。
+/docs/upstream-notes.md
+/docs/design/05-what-we-fake.md
+/tools/reference-qoder/
+/tools/reference-trae-zcode/
+/tools/*.py
+/scripts/package.py
+/scripts/package.sh
+/scripts/package-linux.sh
+/deploy.sh
+/Dockerfile.offline
+/Dockerfile.offline.dockerignore
+/docker-compose.offline.yml
+qoder-machine-identity.json

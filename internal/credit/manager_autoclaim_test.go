@@ -60,7 +60,7 @@ func TestMigrateLegacyAutoClaim(t *testing.T) {
 	}
 
 	// ⚠️ 旧键必须从**落盘的状态**里消失，否则每次启动都会重跑一遍迁移，
-	//   把用户后来关掉的账号又打开。
+	//   把已经关掉的账号又打开。
 	if _, ok := rawState(t, db, vault)["autoClaim"]; ok {
 		t.Fatal("迁移后状态里仍留着 autoClaim 旧键")
 	}

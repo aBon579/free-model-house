@@ -344,8 +344,8 @@ func TestQoderQueuedErrorReadsNestedCodeNotTopLevel(t *testing.T) {
 }
 
 func TestQueueDelayPrefersServerValue(t *testing.T) {
-	// 上游确实会下发 30 以外的值（实测有 retryAfterSeconds=2 的瞬时排队，
-	// 用户报障原话就是"一次重试就能成功"）。写死兜底值会让该等的没等够。
+	// 上游确实会下发 30 以外的值（实测有 retryAfterSeconds=2 的瞬时排队，重试一次就过）。
+	// 写死兜底值会让该等的没等够。
 	quick := qoderError(`{"code":"10605","message":` + strconv.Quote(`{"isQueued":true,"retryAfterSeconds":2}`) + `}`)
 	l, _ := laneFor(sseURL(t, quick), "qoder", account("a1", "qoder", "m"))
 	_, _, uerr := l.Do(context.Background(), turnFor("qoder/m"), nil)
@@ -359,7 +359,7 @@ func TestQueueDelayPrefersServerValue(t *testing.T) {
 
 func TestTransientQueueWithServiceAvailable(t *testing.T) {
 	// ⚠️ 实测的**瞬时排队**形状：isQueued 是 **false**，只有 serviceAvailable:true
-	//	和 retryAfterSeconds:2 —— 用户报障原话是"一次重试就能成功"。
+	//	和 retryAfterSeconds:2 —— 这类排队重试一次就过。
 	//	判据若要求 isQueued===true 它就落到兜底退避；外层那个 403 若挡住业务码，
 	//	它整个被当成 SERVER 白烧一轮。两层都得穿过。
 	transient := qoderError(`{"code":"10605","message":` +

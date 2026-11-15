@@ -130,8 +130,7 @@ func TestCredentialHint(t *testing.T) {
 }
 
 func TestGenerateKeyFormat(t *testing.T) {
-	// ⚠️ 用户要求："项目自己生成一个固定前缀的 API key"，
-	// 前缀是 `fmh-`。
+	// ⚠️ Key 由项目自己生成，带固定前缀 `fmh-`。
 	key := GenerateKey("fmh-")
 	if !strings.HasPrefix(key, "fmh-") {
 		t.Fatalf("前缀不对: %q", key)

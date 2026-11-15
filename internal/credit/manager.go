@@ -811,7 +811,7 @@ func (m *Manager) Credits(ctx context.Context, id string) (Credits, error) {
 
 // 领取失败的分档。秒数来自两处：侦察件里第三方实现的分类表
 // （tools/reference-trae-zcode/trae-credits.ts:classifyTraeCheckinError），以及 FMH
-// 自己在 TRAE 领取接口上实测过的业务码（1005 套餐上限、9074 签到人数过多）。
+// 在 TRAE 领取接口上实测出现过的业务码（1005 套餐上限、9074 签到人数过多）。
 const (
 	claimKindCredential = "credential" // 凭据已死：自动领停到人工重新登录 / 刷新凭据
 	claimKindPlan       = "plan"       // 套餐级上限：12 小时内再怎么点都是同一个判决

@@ -945,10 +945,9 @@ func (a *Admin) handleProbes(w http.ResponseWriter, r *http.Request) {
 	//
 	// ⚠️ **summary = 最近一轮批量探测，不是历史累计** ——
 	//
-	//	之前用 catalog.SummarizeProbes()（统计 c.probes 这个
-	//	**从不清空的 map**），换一次代理、模型集合变化后，
-	//	旧结论全留在 map 里 → "可用 15 异常 9"永远混着旧数据，
-	//	新一轮只探了 6 个也显示 26 —— 用户看到的数字和任何一轮都对不上。
+	//	若照 catalog 里那份**从不清空的 probes map** 统计，换一次代理、
+	//	模型集合变化后，旧结论全留在 map 里 → "可用 15 异常 9"永远混着旧数据，
+	//	新一轮只探了 6 个也显示 26 —— 界面上的数字和任何一轮都对不上。
 	//	"探测结论"说的一定是**最近这一轮**。
 	out2 := map[string]any{
 		"probes": out,

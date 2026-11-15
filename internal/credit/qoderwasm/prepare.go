@@ -1,5 +1,9 @@
 // Package qoderwasm prepares Qoder requests using the embedded official WASM.
 // It performs no network requests and reads no credentials from the host.
+//
+// qoder-auth-official.wasm 是上游客户端的**原始二进制**，未反编译、未修改，
+// 也不是本项目的作品 —— 带上它只因为请求的准备工作必须由这段代码自己完成。
+// 它的完整性由 TestOfficialWASMIntegrity 里的 SHA-256 固定：换文件必测试红。
 package qoderwasm
 
 import (

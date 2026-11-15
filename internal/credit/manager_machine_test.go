@@ -54,8 +54,9 @@ func TestMachineIdentitySurvivesReload(t *testing.T) {
 
 func TestSnapshotMachineNeverLeaksToken(t *testing.T) {
 	m, _ := holdFixture(t)
-	const secret = "P1gASECRETdoNotLeakThisTokenValue"
-	if err := m.SetMachineIdentity(secret, "SYNTHETIC-machineType-never-a-real-credential"); err != nil {
+	const secret = "SYNTHETIC-machineToken-never-a-real-credential"
+	const machineType = "SYNTHETIC-machineType-never-a-real-credential"
+	if err := m.SetMachineIdentity(secret, machineType); err != nil {
 		t.Fatalf("写入失败：%v", err)
 	}
 	b, err := json.Marshal(m.Snapshot())

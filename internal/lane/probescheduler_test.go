@@ -496,10 +496,9 @@ func TestSetIntervalAndBatchSize(t *testing.T) {
 
 // TestFullProbeCoversAllEveryRound 验证**关闭自适应时每轮覆盖数恒定**。
 //
-// ⚠️ 这是用户反馈的直接回归测试：
+// ⚠️ 回归目标 —— 关闭自适应后，自动探测的模型数量不能一会多一会少：
 //
-//	"关闭自适应后，自动探测的模型数量一会多一会少"。
-//	现在每轮的探测数必须**恒等于**参与自动探测的模型数（这里 9 个）。
+//	每轮的探测数必须**恒等于**参与自动探测的模型数（这里 9 个）。
 func TestFullProbeCoversAllEveryRound(t *testing.T) {
 	const models = 9
 	ids := make([]string, 0, models)

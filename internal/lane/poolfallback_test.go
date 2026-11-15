@@ -13,10 +13,9 @@ import (
 //	        ① Kilo ↔ Zen（都是免密的，不花任何人的钱）
 //	        ② 两条免密车道都没有可用模型了 → OpenRouter
 //
-// ⚠️ 跟旧版的关键区别：
-// 旧版"跨车道回落"是**默认允许免密车道之间互切**的
-// （只有用 OpenRouter 才要许可）—— 于是**关掉开关也拦不住换模型**。
-// 新版是**真开关**：关了就一个模型都不换。
+// ⚠️ 关键在于它管的是**免密车道之间互切**，不只是"能不能用 OpenRouter"：
+// 若只把它当成 OpenRouter 的许可，关掉之后 zen ↔ Kilo 照样互切，开关等于没生效。
+// 这里是**真开关**：关了就一个模型都不换。
 
 // newPoolRouter 搭一个三车道路由器（zen / Kilo / OpenRouter）。
 func newPoolRouter(t *testing.T, autoSwitch bool) (*Router, *fakeLane, *fakeLane, *fakeLane) {
@@ -48,7 +47,7 @@ func poolTurn() *Turn {
 
 // TestAutoSwitchOffDoesNotSwitchModel 验证**关闭时一个模型都不换**。
 //
-// ⚠️ 这是本次语义变更的**核心断言** ——
+// ⚠️ 这是这个开关最**核心的断言** ——
 //
 //	zen/model-a 挂了 → **不**换到 kilo/model-k
 //	→ **不**换到 openrouter/model-c
@@ -72,8 +71,8 @@ func TestAutoSwitchOffDoesNotSwitchModel(t *testing.T) {
 
 // TestAutoSwitchOffRetriesSameModel 验证**关闭时会重试当前模型**。
 //
-// ⚠️ 用户的原话："遇到当前调用的模型限流或不可用，
-// **重试后还是不行**就调用失败不进行模型切换。"
+// ⚠️ 要求是："当前调用的模型限流或不可用时，
+// **重试后还是不行**才算调用失败，不做模型切换。"
 //
 // 所以"重试"必须真的发生 —— 不是一撞就报错。
 func TestAutoSwitchOffRetriesSameModel(t *testing.T) {
@@ -158,8 +157,8 @@ func TestAutoSwitchOnSwitchesToKeylessLane(t *testing.T) {
 
 // TestAutoSwitchOnPrefersKeylessOverOpenRouter 验证**免密车道优先于 OpenRouter**。
 //
-// ⚠️ 用户的原话："切换优先级为 kilo、zen 之间切换，
-// 这两个车道都没有可用的模型再进行 OR 车道的探测。"
+// ⚠️ 优先级顺序要求：先在 kilo、zen 两条免密车道之间切，
+// 这两条都没有可用模型了，再进行 OR 车道的探测。
 func TestAutoSwitchOnPrefersKeylessOverOpenRouter(t *testing.T) {
 	router, zen, kilo, or := newPoolRouter(t, true)
 

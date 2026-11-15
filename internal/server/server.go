@@ -19,7 +19,7 @@ import (
 //
 // ## 为什么是单端口？
 //
-// 用户要求 `BASEURL: http://NAS-IP:8678/v1` + `API Key: fmh-…`，
+// 部署形态要求 `BASEURL: http://NAS-IP:8678/v1` + `API Key: fmh-…`，
 // 所以**一个端口**同时承载：
 //
 //	/v1/*        推理面（给 LAN 里的 agent）
