@@ -11,7 +11,10 @@
 #   IDE 用的那套，所以第一个参数 3 不能省）。
 #
 # 用法（默认就是"在桌面生成一个文件"，不用加参数）：
-#   .\qoder-machine-identity.ps1
+#   双击同目录的 qoder-machine-identity.cmd —— 这是给人用的入口。
+#     .ps1 双击只会用记事本打开（Windows 的默认文件关联），所以旁边放了个 .cmd 壳：
+#     它负责 -ExecutionPolicy Bypass、默认带 -Reveal（弹资源管理器并选中文件）、跑完停住等你按键。
+#   命令行：.\qoder-machine-identity.ps1
 #     → 桌面覆盖写 qoder-machine-identity.json，然后到 FMH 的 Credit 页
 #       「Qoder 设备身份」→「导入」→ 选这个文件，点保存。
 #       注意：得在**生成文件这台电脑**的浏览器里打开 FMH，选文件是本机读本地磁盘。
@@ -20,9 +23,6 @@
 #   只看结果：  .\qoder-machine-identity.ps1 -NoFile -PrintJson
 #   懒得开弹窗：.\qoder-machine-identity.ps1 -Gateway http://192.168.1.20:8080   # 要输密码，走明文 HTTP
 #   指定 exe：  .\qoder-machine-identity.ps1 -Exe "E:\Qoder\resources\umid\runtime-info.exe"
-#
-# 双击这个 .ps1 不会运行（Windows 会用记事本打开它）。要么右键 → 使用 PowerShell 运行，
-#   要么在 PowerShell 里 cd 到 tools 目录再执行上面那行。
 #
 # 什么时候要重跑：这两值是每次现生成的，客户端升级或过一段时间可能换成另一份；
 #   如果 Credit 页里「每日签到」又不见了、或签到报「上游未确认领取成功」，

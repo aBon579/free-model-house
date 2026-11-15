@@ -268,7 +268,7 @@ function MachineDialog({ machine, onClose, onDone }: { machine?: MachineStatus; 
     <Modal title="导入 Qoder 设备身份" onClose={onClose} busy={op.busy}>
       <Notice>每日领取要的一对请求头（Cosy-MachineToken / Cosy-MachineType）。它由 Qoder 客户端在<b>你这台电脑</b>上算出来，和登录哪个账号无关；网关跑在 NAS 上没有客户端，只能由电脑送一份过来，全局存一份共用。</Notice>
       <Notice tone="warn">原值只进不出：这个接口发给你自己的网关这一次，页面不显示也不保存它（账户快照每 30 秒轮询一次，带上原值等于把凭据挂在列表里）。不要伪造这两个值。</Notice>
-      <Notice>怎么拿：在装有 Qoder 客户端的电脑上运行 <span className="mono">tools/qoder-machine-identity.ps1</span>，它默认在<b>桌面</b>覆盖生成 <span className="mono">qoder-machine-identity.json</span>（实际落在哪个目录以脚本输出的那行为准）—— 用下面的「从 JSON 文件读取」选它就行，原值不经网络（所以要在这台电脑自己的浏览器里打开 FMH）。身份会随客户端升级换新，只导刚跑出来的那一份。</Notice>
+      <Notice>怎么拿：在这台装有 Qoder 客户端的电脑上双击 <span className="mono">tools\qoder-machine-identity.cmd</span>（双击 <span className="mono">.ps1</span> 只会用记事本打开，所以配了这个壳），它默认在<b>桌面</b>覆盖生成 <span className="mono">qoder-machine-identity.json</span>（实际落在哪个目录以脚本输出的那行为准）—— 用下面的「从 JSON 文件读取」选它就行，原值不经网络（所以要在这台电脑自己的浏览器里打开 FMH）。身份会随客户端升级换新，只导刚跑出来的那一份。</Notice>
       <SecretIntake
         busy={op.busy}
         value={text}
@@ -716,7 +716,7 @@ export function Credit() {
             </div>
             {data?.machine?.configured
               ? <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11.5px] text-[var(--ink-3)]"><span className="mono">指纹：{data.machine.hint || '未知'}</span><span>写入于 {date(data.machine.updatedAt)}</span><span>全局共用一份；凭据里自带成对值的账号用自己的。</span></div>
-              : <Notice tone="warn">还没有设备身份。上游缺这两个头时不会下发「每日签到」，签到也就一定领不到 —— 这不代表你的账号没有活动。在装有 Qoder 客户端的电脑上跑 <span className="mono">tools/qoder-machine-identity.ps1</span>，它会在<b>桌面</b>生成 <span className="mono">qoder-machine-identity.json</span>（路径以脚本输出为准）；用这台电脑的浏览器点右上「导入」，选这个文件即可。</Notice>}
+              : <Notice tone="warn">还没有设备身份。上游缺这两个头时不会下发「每日签到」，签到也就一定领不到 —— 这不代表你的账号没有活动。在这台电脑上双击 <span className="mono">tools\qoder-machine-identity.cmd</span>（直接跑同名 <span className="mono">.ps1</span> 也行），它会在<b>桌面</b>生成 <span className="mono">qoder-machine-identity.json</span>（路径以脚本输出为准）；用这台电脑的浏览器点右上「导入」，选这个文件即可。</Notice>}
           </CardBody></Card>}
           <div className="flex flex-wrap items-center justify-between gap-3"><h2 className="text-[15px] font-semibold text-[var(--ink)]">{channel.name} 账户</h2><div className="flex flex-wrap gap-2"><Button size="sm" disabled={query.isFetching} onClick={() => void query.refetch()}>{query.isFetching ? <Spinner /> : <RefreshCw size={13} />}刷新列表</Button><Button size="sm" disabled={batch || !visible.some(a => a.enabled && !busy(a))} onClick={() => void batchClaim()}>{batch ? <Spinner /> : <Gift size={13} />}{batch ? '逐号签到中…' : '本渠道批量签到'}</Button><Button size="sm" variant="primary" disabled={!provider?.loginModes.length} onClick={() => { if (provider) setDialog({ kind: 'login', provider }) }}><ExternalLink size={13} />浏览器登录</Button></div></div>
           {query.isLoading ? <Card><Loading label="正在加载 Credit 账户…" /></Card> : !visible.length && data ? <Card><Empty icon={<Wallet size={32} />} title={`还没有 ${channel.name} 账户`} description={`点上方「浏览器登录」连接你的 ${channel.name} 账户。未添加账户时不会查询上游，也不会测试模型。`} /></Card> : visible.map((account, index) => {
