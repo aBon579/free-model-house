@@ -67,6 +67,8 @@ type holdAdapter struct {
 	creditsErr error
 	claimErr   error
 	claims     int
+	// lastCred 记下适配器**实际收到**的凭据，用来验证全局设备身份确实补进了调用。
+	lastCred Credential
 }
 
 func (h *holdAdapter) StartLogin(context.Context, string) (*Login, error) {
@@ -80,13 +82,15 @@ func (h *holdAdapter) Refresh(context.Context, Credential) (Credential, error) {
 	return nil, errors.New("测试不刷新凭据")
 }
 func (h *holdAdapter) Models(context.Context, Credential) ([]Model, error) { return []Model{}, nil }
-func (h *holdAdapter) Credits(context.Context, Credential) (Credits, error) {
+func (h *holdAdapter) Credits(_ context.Context, c Credential) (Credits, error) {
+	h.lastCred = c
 	if h.creditsErr != nil {
 		return Credits{}, h.creditsErr
 	}
 	return Credits{Campaigns: []Campaign{{ID: "daily", Name: "每日签到", Claimable: true}}}, nil
 }
-func (h *holdAdapter) Claim(context.Context, Credential, string) (ClaimResult, error) {
+func (h *holdAdapter) Claim(_ context.Context, c Credential, _ string) (ClaimResult, error) {
+	h.lastCred = c
 	h.claims++
 	if h.claimErr != nil {
 		return ClaimResult{ID: "daily", Name: "每日签到"}, h.claimErr

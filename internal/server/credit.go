@@ -142,6 +142,8 @@ func (a *Admin) handleCredit(w http.ResponseWriter, r *http.Request) {
 	case "/import":
 		var body struct {
 			Accounts []credit.BackupAccount `json:"accounts"`
+			// 旧备份没有这个键 → 空 → 保持网关现有身份不动。
+			MachineIdentity credit.Credential `json:"machineIdentity,omitempty"`
 		}
 		if !creditPost(w, r, &body) {
 			return
@@ -153,6 +155,14 @@ func (a *Admin) handleCredit(w http.ResponseWriter, r *http.Request) {
 			// ⚠️ 导入是**逐个**落盘的，中途失败要说清已经进了几个。
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
+		}
+		// 设备身份是全局的，成对且非空才覆盖；半个值宁可忽略也别把能用的清掉。
+		if token, machineType := body.MachineIdentity.Text("machineToken"), body.MachineIdentity.Text("machineType"); token != "" && machineType != "" {
+			// 成对非空才会进到这里，SetMachineIdentity 在此条件下不可能失败；
+			// 而账户已经逐个落盘了，任何后续问题都不能把它报成「没导入」。
+			if err := m.SetMachineIdentity(token, machineType); err == nil {
+				a.logCredit("从备份导入 Qoder 设备身份：%s", m.MachineStatus().Hint)
+			}
 		}
 		a.logCredit("导入 Credit 账户：%d 个", count)
 		writeJSON(w, http.StatusOK, map[string]any{"imported": count})
@@ -171,12 +181,37 @@ func (a *Admin) handleCredit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		accounts := m.Export()
-		a.logCredit("导出 Credit 账户凭据：%d 个（文件由用户保存，请自行妥善保管）", len(accounts))
-		writeJSON(w, http.StatusOK, map[string]any{
+		out := map[string]any{
 			"format":   "fmh-credit",
 			"version":  1,
 			"accounts": accounts,
-		})
+		}
+		// 设备身份漏在备份里，重建 NAS 就又要从 PC 送一次。
+		if identity := m.MachineIdentity(); len(identity) > 0 {
+			out["machineIdentity"] = identity
+		}
+		a.logCredit("导出 Credit 账户凭据：%d 个（文件由用户保存，请自行妥善保管）", len(accounts))
+		writeJSON(w, http.StatusOK, out)
+	case "/machine":
+		var body struct {
+			MachineToken string `json:"machineToken"`
+			MachineType  string `json:"machineType"`
+		}
+		if !creditPost(w, r, &body) {
+			return
+		}
+		if err := m.SetMachineIdentity(body.MachineToken, body.MachineType); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		status := m.MachineStatus()
+		if status.Configured {
+			a.logCredit("设置 Qoder 设备身份：%s（由 PC 脚本或界面导入）", status.Hint)
+		} else {
+			a.logCredit("清除 Qoder 设备身份")
+		}
+		// 只回指纹，绝不回显原值：这个接口由脚本调用，回显等于把凭据在链路上多走一遍。
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "machine": status})
 	default:
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "not found"})
 	}

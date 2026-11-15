@@ -42,6 +42,10 @@ export interface Account {
   // claimCooldownUntil 为负 = 停到人工解除（重新登录 / 刷新凭据 / 重置状态）。
   claimCooldownUntil?: number
   claimCooldownKind?: ClaimCooldownKind
+  // 这个号真去领取时带不带得上设备身份（自带成对值，或全局那一份能补上）。
+  // 由网关按当前凭据算出来；缺它时上游连「每日签到」都不下发，页面要靠它
+  // 分清"这个号没有活动"和"网关缺设备身份"。非 Qoder 渠道恒为 true。
+  machineReady?: boolean
 }
 
 export type ClaimCooldownKind = 'credential' | 'plan' | 'server' | 'rate' | string
@@ -53,9 +57,25 @@ export interface Provider {
   loginModes: string[]
 }
 
+// 全局一份的 Qoder 设备身份**状态**。原值只进不出 —— 这个对象跟着 /api/credit 每 30 秒被轮询一次，
+// 后端只给指纹（machineToken 头 6 + 尾 4），所以页面无法把它抄回剪贴板。
+export interface MachineStatus {
+  configured: boolean
+  hint?: string
+  updatedAt?: number
+}
+
 export interface CreditState {
   providers: Provider[]
   accounts: Account[]
+  machine?: MachineStatus
+}
+
+// machineToken 与 machineType 必须成对：只给一个，上游会退回另一套备用身份，
+// 表现是「每日签到」整项从清单里消失，而不是报个错。
+export interface MachineIdentity {
+  machineToken: string
+  machineType: string
 }
 
 export interface Login {
@@ -105,6 +125,14 @@ export interface ImportAccount {
   effort?: string
   maxMode?: boolean
   [key: string]: unknown
+}
+
+// 备份文件里那一份设备身份：原样回传即可，页面不需要知道它的值。
+export type CreditBackup = {
+  format: 'fmh-credit'
+  version: number
+  accounts: ImportAccount[]
+  machineIdentity?: Record<string, unknown>
 }
 
 export class CreditError extends Error {
@@ -157,8 +185,10 @@ export const creditApi = {
   // 由用户粘贴跳转 URL 换取凭据。其余渠道靠 loginStatus 轮询，不需要这个。
   completeLogin: (id: string, callback: string) => request<unknown>('/login/complete', { id, callback }),
   cancelLogin: (id: string) => request<unknown>('/login/cancel', { id }),
-  import: (accounts: ImportAccount[]) => request<{ imported: number }>('/import', { accounts }),
-  export: () => request<{ format: 'fmh-credit'; version: 1; accounts: ImportAccount[] }>('/export', { confirm: true }),
+  import: (body: { accounts: ImportAccount[]; machineIdentity?: Record<string, unknown> }) => request<{ imported: number }>('/import', body),
+  export: () => request<CreditBackup>('/export', { confirm: true }),
+  // 写入/覆盖全局设备身份；两个值都给空串 = 清除。响应里只有指纹，没有原值。
+  machine: (body: MachineIdentity) => request<{ ok: boolean; machine: MachineStatus }>('/machine', body),
 }
 
 export function useCredit() {

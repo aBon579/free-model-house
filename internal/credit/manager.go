@@ -41,6 +41,12 @@ type Account struct {
 	// 负值 = 停到人工解除（凭据失效那一档），由重新登录 / 刷新凭据 / 重置状态清掉。
 	ClaimCooldownUntil int64  `json:"claimCooldownUntil,omitempty"`
 	ClaimCooldownKind  string `json:"claimCooldownKind,omitempty"`
+	// MachineReady 是**算出来的**：这个号真去领取时带不带得上那对设备标头
+	// （自带成对值优先，否则用全局那一份）。缺它时上游连「每日签到」都不下发，
+	// 页面要靠它区分"这个号没活动"和"网关没身份"——两种说法完全不是同一件事。
+	//
+	// 不吃这两个头的渠道（TRAE）一律算就绪，免得页面误报。
+	MachineReady bool `json:"machineReady,omitempty"`
 }
 
 type storedAccount struct {
@@ -52,6 +58,10 @@ type storedAccount struct {
 type state struct {
 	Accounts      []storedAccount   `json:"accounts"`
 	LastAutoClaim map[string]string `json:"lastAutoClaim"`
+	// MachineIdentity 是**全局一份** Qoder 设备身份（machineToken / machineType 成对）。
+	// 放全局而不是各账号凭据里：它是设备指纹，与登录哪个账号无关，
+	// 而网关本身（NAS / 容器）没有客户端可以现场生成，只能从装客户端的机器送一份过来。
+	MachineIdentity Credential `json:"machineIdentity,omitempty"`
 	// LegacyAutoClaim 只为装载旧状态而存在：migrateAutoClaim 把它落成每账号的时刻
 	// 后立刻写回 false，omitempty 让这个键从此消失。调度路径不读它。
 	LegacyAutoClaim bool `json:"autoClaim,omitempty"`
@@ -65,8 +75,17 @@ type Provider struct {
 }
 
 type Snapshot struct {
-	Providers []Provider `json:"providers"`
-	Accounts  []Account  `json:"accounts"`
+	Providers []Provider    `json:"providers"`
+	Accounts  []Account     `json:"accounts"`
+	Machine   MachineStatus `json:"machine"`
+}
+
+// MachineStatus 是全局设备身份**可以公开的那部分**。原值只进不出：
+// 快照每 30 秒被轮询一次，绝不能把 machineToken 放进去。
+type MachineStatus struct {
+	Configured bool   `json:"configured"`
+	Hint       string `json:"hint,omitempty"`
+	UpdatedAt  int64  `json:"updatedAt,omitempty"`
 }
 
 type AccountPatch struct {
@@ -330,8 +349,100 @@ func (m *Manager) Snapshot() Snapshot {
 		out.Providers = append(out.Providers, p)
 	}
 	for _, a := range s.Accounts {
-		out.Accounts = append(out.Accounts, a.Account)
+		// 设备身份是派生信息，每次都按"此刻的凭据 + 此刻的全局身份"重算，不取存量的那份。
+		view := a.Account
+		view.MachineReady = machineReady(a.Provider, a.Credential, s.MachineIdentity)
+		out.Accounts = append(out.Accounts, view)
 	}
+	out.Machine = machineStatus(s.MachineIdentity)
+	return out
+}
+
+// paired 说这份凭据里 machineToken / machineType **两个都有**。只有一半不算：
+// 上游见到缺头会退回另一套备用身份，症状和"这个账号没活动"一模一样。
+func paired(credential Credential) bool {
+	return credential.Text("machineToken") != "" && credential.Text("machineType") != ""
+}
+
+func machineStatus(identity Credential) MachineStatus {
+	token := identity.Text("machineToken")
+	if !paired(identity) {
+		return MachineStatus{}
+	}
+	return MachineStatus{Configured: true, Hint: store.CredentialHint(token), UpdatedAt: Timestamp(identity["updatedAt"])}
+}
+
+// machineReady 判断这个号领取时能不能带上设备标头：自带的成对值优先，否则看全局那一份。
+// 不需要这两个头的渠道直接算就绪（页面上不该对 TRAE 喊"缺设备身份"）。
+func machineReady(provider string, credential, global Credential) bool {
+	if provider != "qoder" && provider != "qodercn" {
+		return true
+	}
+	return paired(credential) || paired(global)
+}
+
+// SetMachineIdentity 存一份全局 Qoder 设备身份。两个值必须**成对**：
+// 只给一个时上游会退回「另一套备用身份」，症状与「这个账号没活动」一模一样，
+// 所以宁可报错也不能收下。两个都空 = 清除。
+func (m *Manager) SetMachineIdentity(machineToken, machineType string) error {
+	machineToken, machineType = strings.TrimSpace(machineToken), strings.TrimSpace(machineType)
+	if (machineToken == "") != (machineType == "") {
+		return errors.New("machineToken 与 machineType 必须成对提供，只给一个上游不认")
+	}
+	m.mu.Lock()
+	next := m.copyLocked()
+	if machineToken == "" {
+		next.MachineIdentity = nil
+	} else {
+		next.MachineIdentity = Credential{"machineToken": machineToken, "machineType": machineType, "updatedAt": time.Now().UnixMilli()}
+	}
+	err := m.saveLocked(next)
+	m.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	m.changed()
+	return nil
+}
+
+// MachineIdentity 返回原值，只给备份导出用；界面一律走 Snapshot().Machine 的指纹。
+func (m *Manager) MachineIdentity() Credential {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.state.MachineIdentity.Clone()
+}
+
+// MachineStatus 给出设备身份的可公开部分，供写接口回显与界面展示。
+func (m *Manager) MachineStatus() MachineStatus {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return machineStatus(m.state.MachineIdentity)
+}
+
+// credentialFor 把全局设备身份补进缺 machine 头的 Qoder 凭据 —— 账号自带的优先，
+// 因为那台机器可能装着客户端、身份更贴切。自带只算"成对才算自带"：
+// 只带半个的凭据一律整套换掉，留半个等于留一个上游不认的头。
+//
+// ⚠️ 只用在 /sash/ 这类积分与活动调用上。推理（Prepare）不走这里，
+// 它的签名另有 machineId 参与，混进来只会让线上推理路径无故变化。
+func (m *Manager) credentialFor(a storedAccount) Credential {
+	if a.Provider != "qoder" && a.Provider != "qodercn" {
+		return a.Credential
+	}
+	m.mu.RLock()
+	identity := m.state.MachineIdentity
+	m.mu.RUnlock()
+	if !paired(identity) {
+		return a.Credential
+	}
+	if paired(a.Credential) {
+		return a.Credential
+	}
+	out := a.Credential.Clone()
+	if out == nil {
+		out = Credential{}
+	}
+	out["machineToken"], out["machineType"] = identity.Text("machineToken"), identity.Text("machineType")
 	return out
 }
 
@@ -620,7 +731,7 @@ func (m *Manager) Refresh(ctx context.Context, id string) error {
 }
 
 func (m *Manager) refresh(ctx context.Context, a storedAccount) (storedAccount, error) {
-	c, err := m.adapters[a.Provider].Refresh(ctx, a.Credential)
+	c, err := m.adapters[a.Provider].Refresh(ctx, m.credentialFor(a))
 	if err != nil {
 		_ = m.updateAccount(a, func(v *storedAccount) { v.Error = err.Error() })
 		return a, err
@@ -663,7 +774,7 @@ func (m *Manager) RefreshModels(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	models, err := m.adapters[a.Provider].Models(ctx, a.Credential)
+	models, err := m.adapters[a.Provider].Models(ctx, m.credentialFor(a))
 	if err != nil {
 		_ = m.updateAccount(a, func(v *storedAccount) { v.Error = err.Error() })
 		return err
@@ -689,7 +800,7 @@ func (m *Manager) Credits(ctx context.Context, id string) (Credits, error) {
 	if err != nil {
 		return Credits{}, err
 	}
-	credits, err := m.adapters[a.Provider].Credits(ctx, a.Credential)
+	credits, err := m.adapters[a.Provider].Credits(ctx, m.credentialFor(a))
 	if err != nil {
 		_ = m.updateAccount(a, func(v *storedAccount) { v.Error = err.Error() })
 		return credits, err
@@ -812,7 +923,8 @@ func (m *Manager) Claim(ctx context.Context, id, campaignID string) ([]ClaimResu
 		return nil, err
 	}
 	adapter := m.adapters[a.Provider]
-	credits, err := adapter.Credits(ctx, a.Credential)
+	cred := m.credentialFor(a)
+	credits, err := adapter.Credits(ctx, cred)
 	if err != nil {
 		m.noteClaimFailure(a, err)
 		return nil, err
@@ -830,7 +942,7 @@ func (m *Manager) Claim(ctx context.Context, id, campaignID string) ([]ClaimResu
 		if !campaign.Claimable {
 			continue
 		}
-		res, claimErr := adapter.Claim(ctx, a.Credential, campaign.ID)
+		res, claimErr := adapter.Claim(ctx, cred, campaign.ID)
 		if claimErr != nil {
 			res = ClaimResult{ID: campaign.ID, Name: campaign.Name, Message: claimErr.Error()}
 			if h := classifyClaimError(claimErr); h.severity() > worst.severity() {
@@ -843,7 +955,7 @@ func (m *Manager) Claim(ctx context.Context, id, campaignID string) ([]ClaimResu
 		results = append(results, ClaimResult{Message: "当前没有可领取的活动，不等同于今天已领取"})
 	}
 	m.setClaimHold(a, worst)
-	fresh, ferr := adapter.Credits(ctx, a.Credential)
+	fresh, ferr := adapter.Credits(ctx, cred)
 	if ferr == nil {
 		_ = m.updateAccount(a, func(v *storedAccount) { v.Credits = &fresh; v.Error = "" })
 	}

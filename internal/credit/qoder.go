@@ -247,7 +247,7 @@ func (q *qoderAdapter) Credits(ctx context.Context, c Credential) (Credits, erro
 		out.Warning = strings.TrimSpace(out.Warning + " 活动查询失败：" + cerr.Error())
 	}
 	if c.Text("machineToken") == "" || c.Text("machineType") == "" {
-		out.Warning = strings.TrimSpace(out.Warning + " 每日领取需要官方设备身份 machineToken / machineType；可通过凭据导入补充，不会自动读取桌面账号。")
+		out.Warning = strings.TrimSpace(out.Warning + " 缺少官方设备身份 machineToken / machineType：上游因此不会下发「每日签到」，活动清单看着是空的。请在 Credit 页「设备身份」里导入（由装有 Qoder 客户端的电脑生成，网关自己读不到桌面账号）。")
 	}
 	if uerr != nil && cerr != nil {
 		return out, uerr
@@ -261,7 +261,7 @@ func (q *qoderAdapter) Claim(ctx context.Context, c Credential, id string) (Clai
 		return out, errors.New("请选择具体活动")
 	}
 	if c.Text("machineToken") == "" || c.Text("machineType") == "" {
-		return out, errors.New("请先导入官方设备身份 machineToken 和 machineType，以免遗漏可领取活动")
+		return out, errors.New("这台网关还缺官方设备身份，请先在 Credit 页「设备身份」导入 machineToken 和 machineType —— 缺它时上游连「每日签到」都不会下发")
 	}
 	h := q.headers(c)
 	h["Content-Type"] = "application/json"

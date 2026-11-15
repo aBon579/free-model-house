@@ -4,7 +4,7 @@ import { ArrowDown, ArrowUp, Download, ExternalLink, Gift, KeyRound, Pencil, Ref
 import { PageTitle } from '../components/Shell'
 import { Badge, Button, Card, CardBody, CardHeader, Empty, ErrorNote, Field, Input, Loading, Notice, Select, Spinner, Stat, Switch, cn } from '../components/ui'
 import { useToast } from '../components/toast'
-import { creditApi, useCredit, type Account, type AccountAction, type AccountUpdate, type ActionResult, type CreditDate, type Credits, type ImportAccount, type Login, type Model, type Provider, type ProviderId } from '../api/credit'
+import { creditApi, useCredit, type Account, type AccountAction, type AccountUpdate, type ActionResult, type CreditDate, type Credits, type ImportAccount, type Login, type MachineIdentity, type MachineStatus, type Model, type Provider, type ProviderId } from '../api/credit'
 
 const channels: { id: ProviderId; name: string; description: string }[] = [
   { id: 'qoder', name: 'Qoder', description: '国际版账户与资源包' },
@@ -54,6 +54,48 @@ function claimHoldText(account: Account) {
   }
   const until = new Date(account.claimCooldownUntil ?? 0)
   return `暂停至 ${until.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}（${claimHoldName(account.claimCooldownKind)}）`
+}
+
+// 只有 Qoder / Qoder 中国版的每日领取要那对设备标头，TRAE 不要 —— 所以设备身份这一栏
+// 只挂在 Qoder 两个标签下，别让用户以为 TRAE 也缺东西。
+function needsMachine(provider: ProviderId) {
+  return provider === 'qoder' || provider === 'qodercn'
+}
+
+/**
+ * 从一段文本里解出成对的设备身份，三种来源都认：
+ * PC 脚本 -OutFile 存的裸 JSON、FMH 备份里的 machineIdentity 块、旧的逐账户 credential。
+ * 解不出来返回 null（边输入边判断用，不能抛错）。
+ */
+function machineFromText(raw: string): MachineIdentity | null {
+  let doc: unknown
+  try {
+    // PowerShell 的 Set-Content -Encoding UTF8 会在文件头留一个 BOM，JSON.parse 不认它。
+    doc = JSON.parse(raw.charCodeAt(0) === 0xFEFF ? raw.slice(1) : raw)
+  } catch {
+    return null
+  }
+  if (!isObject(doc)) return null
+  const source = isObject(doc.machineIdentity) ? doc.machineIdentity : isObject(doc.credential) ? doc.credential : doc
+  const machineToken = typeof source.machineToken === 'string' ? source.machineToken.trim() : ''
+  const machineType = typeof source.machineType === 'string' ? source.machineType.trim() : ''
+  return machineToken && machineType ? { machineToken, machineType } : null
+}
+
+/**
+ * 把一次签到的一堆逐项结果说成一句人话。三种"没领到"是不同的事，
+ * 混成一句"签到完成"就会让人以为额度已经到账（上游余额真没动）。
+ */
+function claimSummary(items: ActionResult['results'], machineMissing: boolean): { ok: boolean; text: string } {
+  const list = items ?? []
+  const got = list.filter(item => item.claimed)
+  const failed = list.filter(item => !item.claimed && !item.alreadyClaimed && item.id)
+  const already = list.filter(item => item.alreadyClaimed)
+  if (got.length) return { ok: !failed.length, text: failed.length ? `领到 ${got.length} 项，另有 ${failed.length} 项没成：${failed[0].message}` : `领到 ${got.length} 项，余额已刷新` }
+  if (failed.length) return { ok: false, text: `没领到：${failed[0].message}` }
+  if (already.length) return { ok: true, text: '上游记着这一项今天已经领过了，所以余额没变 —— 如果不是这台网关领的，那就是你在电脑上的 Qoder 客户端里领的。' }
+  if (machineMissing) return { ok: false, text: '这台网关还没有 Qoder 设备身份：上游因此连「每日签到」都不会下发，现在点多少次都是空清单。先在上方「设备身份」导入。' }
+  return { ok: false, text: '上游这个账号当前没有可领取的活动 —— 这不代表今天领过了（今日那份可能已在客户端领掉，或这份设备身份已经换新）。可点「查询余额」再看一次清单。' }
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -140,6 +182,29 @@ function SecretTextarea({ value, onChange, label, placeholder, disabled }: { val
   return <textarea value={value} onChange={e => onChange(e.target.value)} aria-label={label} placeholder={placeholder} disabled={disabled} autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false} rows={5} style={{ WebkitTextSecurity: 'disc' } as CSSProperties} className="mono w-full resize-y rounded-[var(--r-sm)] border border-[var(--line)] bg-[var(--surface)] p-3 text-[13px] text-[var(--ink)] placeholder:text-[var(--ink-3)] focus:border-[var(--accent)] focus:outline-none disabled:opacity-55" />
 }
 
+async function readJSONFile(file: File) {
+  if (file.size > 5 * 1024 * 1024) throw new Error('文件超过 5 MB，请分批导入。')
+  return file.text()
+}
+
+/** 敏感 JSON 的两种入口：粘贴（遮蔽显示）与选文件。两者都只是填进输入框，点了确认才发出去。 */
+function SecretIntake({ busy, value, onChange, fileName, onFile, hint, secretLabel, fileLabel }: { busy: boolean; value: string; onChange: (value: string) => void; fileName: string; onFile: (file: File) => void; hint: string; secretLabel: string; fileLabel: string }) {
+  return <>
+    <Field label="敏感 JSON（输入已遮蔽）" hint={hint}>
+      <SecretTextarea value={value} onChange={onChange} label={secretLabel} disabled={busy} placeholder="在此粘贴 JSON，内容不回显" />
+    </Field>
+    <label className="flex flex-wrap items-center gap-2 text-[12px]">
+      <Upload size={14} /><span>从 JSON 文件读取</span>
+      <input type="file" accept=".json,application/json" aria-label={fileLabel} disabled={busy} className="max-w-full text-[12px]" onChange={e => {
+        const file = e.target.files?.[0]
+        e.target.value = ''
+        if (file) onFile(file)
+      }} />
+    </label>
+    {fileName && <div className="text-[12px] text-[var(--ink-3)]">已读取：{fileName}，提交前不会上传。</div>}
+  </>
+}
+
 function CredentialDialog({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
   const [secret, setSecret] = useState('')
   const [fileName, setFileName] = useState('')
@@ -147,11 +212,14 @@ function CredentialDialog({ onClose, onDone }: { onClose: () => void; onDone: ()
   async function submit() {
     await op.run(async () => {
       const parsed = parseJSON(secret)
-      const entries = Array.isArray(parsed) ? parsed : isObject(parsed) ? parsed.accounts : undefined
-      if (isObject(parsed) && parsed.format !== undefined && (parsed.format !== 'fmh-credit' || parsed.version !== 1)) throw new Error('不支持的备份格式或版本，仅支持 fmh-credit v1。')
+      const doc = isObject(parsed) ? parsed : undefined
+      const entries = Array.isArray(parsed) ? parsed : doc?.accounts
+      if (doc && doc.format !== undefined && (doc.format !== 'fmh-credit' || doc.version !== 1)) throw new Error('不支持的备份格式或版本，仅支持 fmh-credit v1。')
       if (!Array.isArray(entries) || entries.length === 0) throw new Error('请提供非空 accounts 数组，或完整的 fmh-credit 备份。')
       if (entries.some(entry => !isObject(entry) || !channels.some(c => c.id === entry.provider) || typeof entry.name !== 'string' || !entry.name.trim() || !isObject(entry.credential))) throw new Error('每个账户必须包含有效 provider、name 和 credential 对象。')
-      const result = await creditApi.import(entries as ImportAccount[])
+      // 完整备份里那一份设备身份跟着一起回灌，换机器重建时不必再从 PC 送一次。
+      const identity = doc && isObject(doc.machineIdentity) ? doc.machineIdentity : undefined
+      const result = await creditApi.import({ accounts: entries as ImportAccount[], ...(identity ? { machineIdentity: identity } : {}) })
       setSecret('')
       onDone()
       onClose()
@@ -162,26 +230,59 @@ function CredentialDialog({ onClose, onDone }: { onClose: () => void; onDone: ()
   return (
     <Modal title="导入账户 / 备份" onClose={onClose} busy={op.busy}>
       <Notice>只使用你授权提供的凭据，不读取桌面真实账户。输入仅保存在当前弹窗内存中，关闭即清除，不写入 localStorage。</Notice>
-      <Notice tone="warn">Qoder / Qoder 中国版每日领取需要官方设备信息：请在 credential 中提供 machineToken 和 machineType；缺失时领取可能失败。不要伪造设备信息。</Notice>
-      <Field label="敏感账户 JSON（输入已遮蔽）" hint='格式：{"accounts":[{"provider":"qoder","name":"个人账户","credential":{…}}]}，也可粘贴导出的完整备份。'>
-        <SecretTextarea value={secret} onChange={setSecret} label="敏感凭据 JSON" disabled={op.busy} placeholder="在此粘贴 JSON，内容不回显" />
-      </Field>
-      <label className="flex flex-wrap items-center gap-2 text-[12px]">
-        <Upload size={14} /><span>从 JSON 文件读取</span>
-        <input type="file" accept=".json,application/json" aria-label="导入凭据 JSON 文件" disabled={op.busy} className="max-w-full text-[12px]" onChange={e => {
-          const file = e.target.files?.[0]
-          e.target.value = ''
-          if (!file) return
-          void op.run(async () => {
-            if (file.size > 5 * 1024 * 1024) throw new Error('文件超过 5 MB，请分批导入。')
-            setSecret(await file.text())
-            setFileName(file.name)
-          })
-        }} />
-      </label>
-      {fileName && <div className="text-[12px] text-[var(--ink-3)]">已读取：{fileName}，提交前不会上传。</div>}
+      <Notice tone="warn">Qoder / Qoder 中国版的每日领取要设备身份：账户 credential 里成对的 machineToken 和 machineType 优先，没带就用「设备身份」里全局那一份。备份里若带 machineIdentity，导入时会一并覆盖全局那份。不要伪造设备信息。</Notice>
+      <SecretIntake
+        busy={op.busy}
+        value={secret}
+        onChange={setSecret}
+        fileName={fileName}
+        onFile={file => void op.run(async () => { setSecret(await readJSONFile(file)); setFileName(file.name) })}
+        hint='格式：{"accounts":[{"provider":"qoder","name":"个人账户","credential":{…}}]}，也可粘贴导出的完整备份。'
+        secretLabel="敏感凭据 JSON"
+        fileLabel="导入凭据 JSON 文件"
+      />
       {op.error && <ErrorNote>{op.error}</ErrorNote>}
       <div className="flex justify-end gap-2"><Button disabled={op.busy} onClick={onClose}>取消</Button><Button variant="primary" disabled={op.busy || !secret.trim()} onClick={() => void submit()}>{op.busy && <Spinner />}确认导入</Button></div>
+    </Modal>
+  )
+}
+
+function MachineDialog({ machine, onClose, onDone }: { machine?: MachineStatus; onClose: () => void; onDone: () => void }) {
+  const [text, setText] = useState('')
+  const [fileName, setFileName] = useState('')
+  const op = useOperation()
+  const toast = useToast()
+  const found = text.trim() ? machineFromText(text) : null
+  async function submit() {
+    await op.run(async () => {
+      // found 为空时按钮是禁用的；这一句是给"绕过按钮"的调用者兜底，顺便把话说清楚。
+      if (!found) throw new Error('没读出一对 machineToken / machineType：请粘脚本 -PrintJson 打出的那段 JSON，或选它 -OutFile 存的 .json 文件。')
+      const result = await creditApi.machine(found)
+      setText('')
+      onDone()
+      onClose()
+      toast.ok(`设备身份已写入：${result.machine.hint || '指纹未知'}`)
+    })
+  }
+  return (
+    <Modal title="导入 Qoder 设备身份" onClose={onClose} busy={op.busy}>
+      <Notice>每日领取要的一对请求头（Cosy-MachineToken / Cosy-MachineType）。它由 Qoder 客户端在<b>你这台电脑</b>上算出来，和登录哪个账号无关；网关跑在 NAS 上没有客户端，只能由电脑送一份过来，全局存一份共用。</Notice>
+      <Notice tone="warn">原值只进不出：这个接口发给你自己的网关这一次，页面不显示也不保存它（账户快照每 30 秒轮询一次，带上原值等于把凭据挂在列表里）。不要伪造这两个值。</Notice>
+      <Notice>怎么拿：在装有 Qoder 客户端的电脑上运行 <span className="mono">tools/qoder-machine-identity.ps1 -PrintJson</span>，把打印出的那段 JSON 粘到下面；给脚本加 <span className="mono">-Gateway http://网关地址</span> 就让它自己推过来，不用开这个弹窗。</Notice>
+      <SecretIntake
+        busy={op.busy}
+        value={text}
+        onChange={setText}
+        fileName={fileName}
+        onFile={file => void op.run(async () => { setText(await readJSONFile(file)); setFileName(file.name) })}
+        hint='认这三种：{"machineToken":"…","machineType":"…"}、完整备份里的 machineIdentity 块、带这两个字段的旧 credential。'
+        secretLabel="设备身份 JSON"
+        fileLabel="设备身份 JSON 文件"
+      />
+      {!!text.trim() && <div className={cn('text-[12px]', found ? 'text-[var(--ok)]' : 'text-[var(--warn)]')}>{found ? '已识别出一对设备身份，可以保存。' : '还没读出一对 machineToken / machineType —— 两个都要有，只给一个上游不认。'}</div>}
+      {machine?.configured && <Notice tone="warn">当前已有 {machine.hint || '指纹未知'}（{date(machine.updatedAt)}），保存会用新的一份覆盖它。</Notice>}
+      {op.error && <ErrorNote>{op.error}</ErrorNote>}
+      <div className="flex justify-end gap-2"><Button disabled={op.busy} onClick={onClose}>取消</Button><Button variant="primary" disabled={op.busy || !found} onClick={() => void submit()}>{op.busy && <Spinner />}{machine?.configured ? '覆盖为新身份' : '保存设备身份'}</Button></div>
     </Modal>
   )
 }
@@ -415,7 +516,7 @@ function Unknown({ count }: { count: number }) {
   return count > 0 ? <span className="text-[11px] font-normal text-[var(--ink-3)]">（{count} 包未知）</span> : null
 }
 
-function CreditBalances({ credits, staleError, busy, onClaim }: { credits?: Credits; staleError?: string; busy: boolean; onClaim: (campaignId: string) => void }) {
+function CreditBalances({ credits, staleError, busy, machineMissing, onClaim }: { credits?: Credits; staleError?: string; busy: boolean; machineMissing?: boolean; onClaim: (campaignId: string) => void }) {
   const units = summarize(credits?.balances ?? [])
   return <div className="space-y-3">
     {staleError && <Notice tone="warn">余额获取失败，当前余额未知；下方如有数据，仅为上次成功快照，不代表当前可用额度。</Notice>}
@@ -436,13 +537,13 @@ function CreditBalances({ credits, staleError, busy, onClaim }: { credits?: Cred
           {category.count > 1 && <div className="space-y-1 border-t border-[var(--line)] pt-2">{category.items.map((balance, index) => <div key={`${balance.name}-${index}`} className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-[11.5px] text-[var(--ink-3)]"><span>{date(balance.expiresAt)}{expired(balance.expiresAt) && <Badge tone="warn" className="ml-1.5">已到期</Badge>}{staleError ? ` · 上次剩余 ${quantity(balance.remaining)}` : ''}</span><span>剩余 {quantity(balance.remaining)} · 总量 {quantity(balance.total)} · 已用 {quantity(balance.used)}</span></div>)}</div>}
         </div>)}
       </div>)}
-      <div className="space-y-2 border-t border-[var(--line)] pt-3"><div className="text-[12.5px] font-medium">活动与每日领取</div>{!credits.campaigns?.length ? <p className="text-[12px] text-[var(--ink-3)]">未返回可展示活动；可尝试单号签到，以实际返回结果为准。</p> : credits.campaigns.map(campaign => <div key={campaign.id} className="flex flex-wrap items-center justify-between gap-2 rounded-[var(--r-sm)] border border-[var(--line)] p-2.5"><div><div className="text-[12.5px]">{campaign.name} · {quantity(campaign.amount)} <span className="text-[var(--ink-3)]">（活动额度，单位以上游为准）</span></div><div className="text-[11.5px] text-[var(--ink-3)]">到期 {date(campaign.expiresAt)}</div></div><Button size="sm" disabled={busy || campaign.claimed || !campaign.claimable || expired(campaign.expiresAt)} onClick={() => onClaim(campaign.id)}>{campaign.claimed ? '已领取' : expired(campaign.expiresAt) ? '已到期' : campaign.claimable ? '领取一次' : '不可领取'}</Button></div>)}</div>
+      <div className="space-y-2 border-t border-[var(--line)] pt-3"><div className="text-[12.5px] font-medium">活动与每日领取</div>{!credits.campaigns?.length ? <p className="text-[12px] text-[var(--ink-3)]">{machineMissing ? '清单里没有可领活动，而这台网关还没有 Qoder 设备身份：缺它时上游压根不下发「每日签到」，所以这不代表你的账号没有活动。先在上方导入设备身份，再点一次「查询余额」。' : '未返回可展示活动；可尝试单号签到，以实际返回结果为准。'}</p> : credits.campaigns.map(campaign => <div key={campaign.id} className="flex flex-wrap items-center justify-between gap-2 rounded-[var(--r-sm)] border border-[var(--line)] p-2.5"><div><div className="text-[12.5px]">{campaign.name} · {quantity(campaign.amount)} <span className="text-[var(--ink-3)]">（活动额度，单位以上游为准）</span></div><div className="text-[11.5px] text-[var(--ink-3)]">到期 {date(campaign.expiresAt)}</div></div><Button size="sm" disabled={busy || campaign.claimed || !campaign.claimable || expired(campaign.expiresAt)} onClick={() => onClaim(campaign.id)}>{campaign.claimed ? '已领取' : expired(campaign.expiresAt) ? '已到期' : campaign.claimable ? '领取一次' : '不可领取'}</Button></div>)}</div>
     </>}
   </div>
 }
 
 interface Outcome { state: 'running' | 'ok' | 'error'; text: string; result?: ActionResult }
-type Dialog = { kind: 'import' | 'export' } | { kind: 'edit' | 'delete' | 'reset' | 'test'; account: Account } | { kind: 'login'; provider: Provider; accountId?: string } | null
+type Dialog = { kind: 'import' | 'export' | 'machine' | 'machineClear' } | { kind: 'edit' | 'delete' | 'reset' | 'test'; account: Account } | { kind: 'login'; provider: Provider; accountId?: string } | null
 
 function TestDialog({ account, models, onClose, onTest }: { account: Account; models: Model[]; onClose: () => void; onTest: (model: string) => Promise<void> }) {
   const available = models.filter(model => !account.disabledModels.includes(model.id))
@@ -544,13 +645,17 @@ export function Credit() {
       settled = result
       if (!result.ok) throw new Error(result.message || '操作未成功，请查看账户状态后重试。')
       const hasFailed = result.results?.some(item => !item.claimed && !item.alreadyClaimed) ?? false
-      const text = result.message || (hasFailed ? '部分活动未领取，请查看逐项结果。' : action.action === 'claim' ? '签到请求已完成，实际领取情况见下方结果。' : '操作完成')
-      setOutcomes(values => ({ ...values, [account.id]: { state: hasFailed ? 'error' : 'ok', text, result } }))
+      // 签到单独说一句人话：领到了 / 上游记着已领 / 根本没有可领项，是三件不同的事，
+      // 统一报"操作完成"就会让人以为额度已经到账（而余额其实没动）。
+      const summary = action.action === 'claim' ? claimSummary(result.results, !account.machineReady) : null
+      const bad = summary ? !summary.ok : hasFailed
+      const text = result.message || summary?.text || (hasFailed ? '部分活动未领取，请查看逐项结果。' : '操作完成')
+      setOutcomes(values => ({ ...values, [account.id]: { state: bad ? 'error' : 'ok', text, result } }))
       if (result.credits) {
         qc.setQueryData(['credit'], (previous: typeof data) => previous ? { ...previous, accounts: previous.accounts.map(item => item.id === account.id ? { ...item, credits: result.credits } : item) } : previous)
         setCreditErrors(values => { const next = { ...values }; delete next[account.id]; return next })
       }
-      if (!options.quiet) (hasFailed ? toast.bad : toast.ok)(`${account.name}：${text}`)
+      if (!options.quiet) (bad ? toast.bad : toast.ok)(`${account.name}：${text}`)
     } catch (e) {
       const text = message(e)
       setOutcomes(values => ({ ...values, [account.id]: { state: 'error', text } }))
@@ -564,9 +669,15 @@ export function Credit() {
   }
   async function batchClaim() {
     if (batchLock.current) return
+    const targets = visible.filter(account => account.enabled && !busyIds.has(account.id))
+    // 整渠道一个号都带不上设备身份时，批量签到只会拿到 N 份"没有可领活动"：
+    // 先把话说清楚，也省掉这 N 次注定空手的上游请求。
+    if (targets.length && targets.every(account => !account.machineReady)) {
+      toast.bad('这些账号都还没有 Qoder 设备身份，上游不会下发「每日签到」——先在上方「设备身份」导入。')
+      return
+    }
     batchLock.current = true
     setBatch(true)
-    const targets = visible.filter(account => account.enabled && !busyIds.has(account.id))
     // 同类领取错误连着两个号就整批停：429/9074 是"你太快了"、1005 是套餐级上限、
     // 401 是凭据没了 —— 这几种判决跟是哪个号无关，接着往下撞只是把一次点击
     // 放大成"账号数 × 一轮完整上游请求"。所以第 2 个号照常试（万一是单号问题），
@@ -598,6 +709,15 @@ export function Credit() {
         <div role="tablist" aria-label="Credit 渠道" className="grid grid-cols-2 gap-2 sm:grid-cols-3">{channels.map(item => <button key={item.id} id={`credit-tab-${item.id}`} role="tab" aria-controls={`credit-panel-${providerId}`} aria-selected={providerId === item.id} tabIndex={providerId === item.id ? 0 : -1} onKeyDown={e => { if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') { e.preventDefault(); const step = e.key === 'ArrowRight' ? 1 : channels.length - 1; const next = channels[(channels.findIndex(c => c.id === item.id) + step) % channels.length].id; setProviderId(next); document.getElementById(`credit-tab-${next}`)?.focus() } }} onClick={() => setProviderId(item.id)} className={cn('fmh-hoverable rounded-[var(--r-md)] border p-3 text-left transition-colors', providerId === item.id ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]' : 'border-[var(--line)] bg-[var(--surface)] text-[var(--ink-2)]')}><span className="flex items-center justify-between gap-2 text-[13.5px] font-semibold">{item.name}<Badge tone={providerId === item.id ? 'accent' : 'idle'}>{data ? accounts.filter(account => account.provider === item.id).length : '—'}</Badge></span><span className="mt-1 block text-[11.5px] text-[var(--ink-3)]">{item.description}</span></button>)}</div>
         {query.error && <ErrorNote>账户数据读取失败：{message(query.error)}{data ? '。以下为上次加载的数据。' : ''}<Button size="sm" className="ml-2" onClick={() => void query.refetch()}>重试</Button></ErrorNote>}
         <section role="tabpanel" id={`credit-panel-${providerId}`} aria-labelledby={`credit-tab-${providerId}`} className="space-y-3">
+          {needsMachine(providerId) && <Card><CardBody className="space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="text-[12.5px] font-medium text-[var(--ink)]">Qoder 设备身份</div>
+              <div className="flex flex-wrap gap-2"><Button size="sm" onClick={() => setDialog({ kind: 'machine' })}><Upload size={13} />{data?.machine?.configured ? '换一份' : '导入'}</Button>{data?.machine?.configured ? <Button size="sm" variant="ghost" onClick={() => setDialog({ kind: 'machineClear' })}>清除</Button> : null}</div>
+            </div>
+            {data?.machine?.configured
+              ? <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11.5px] text-[var(--ink-3)]"><span className="mono">指纹：{data.machine.hint || '未知'}</span><span>写入于 {date(data.machine.updatedAt)}</span><span>全局共用一份；凭据里自带成对值的账号用自己的。</span></div>
+              : <Notice tone="warn">还没有设备身份。上游缺这两个头时不会下发「每日签到」，签到也就一定领不到 —— 这不代表你的账号没有活动。在装有 Qoder 客户端的电脑上跑 <span className="mono">tools/qoder-machine-identity.ps1 -Gateway {window.location.origin}</span>，或点右上「导入」粘贴脚本给出的 JSON。</Notice>}
+          </CardBody></Card>}
           <div className="flex flex-wrap items-center justify-between gap-3"><h2 className="text-[15px] font-semibold text-[var(--ink)]">{channel.name} 账户</h2><div className="flex flex-wrap gap-2"><Button size="sm" disabled={query.isFetching} onClick={() => void query.refetch()}>{query.isFetching ? <Spinner /> : <RefreshCw size={13} />}刷新列表</Button><Button size="sm" disabled={batch || !visible.some(a => a.enabled && !busy(a))} onClick={() => void batchClaim()}>{batch ? <Spinner /> : <Gift size={13} />}{batch ? '逐号签到中…' : '本渠道批量签到'}</Button><Button size="sm" variant="primary" disabled={!provider?.loginModes.length} onClick={() => { if (provider) setDialog({ kind: 'login', provider }) }}><ExternalLink size={13} />浏览器登录</Button></div></div>
           {query.isLoading ? <Card><Loading label="正在加载 Credit 账户…" /></Card> : !visible.length && data ? <Card><Empty icon={<Wallet size={32} />} title={`还没有 ${channel.name} 账户`} description={`点上方「浏览器登录」连接你的 ${channel.name} 账户。未添加账户时不会查询上游，也不会测试模型。`} /></Card> : visible.map((account, index) => {
             const outcome = outcomes[account.id]
@@ -611,7 +731,7 @@ export function Credit() {
                 {cooling && <Notice tone="warn">账户冷却至 {date(account.cooldownUntil)}。建议等待冷却结束；重置只清除本地状态，不能绕过上游限制。</Notice>}
                 <div className="flex flex-wrap items-center gap-2"><Button size="sm" disabled={accountBusy} onClick={() => void runAction(account, { id: account.id, action: 'credits' })}><Wallet size={13} />查询余额</Button><Button size="sm" disabled={accountBusy} onClick={() => claim(account)}><Gift size={13} />单号签到</Button><Button size="sm" disabled={accountBusy} onClick={() => void runAction(account, { id: account.id, action: 'refresh' })}><KeyRound size={13} />刷新凭据</Button><Button size="sm" disabled={accountBusy} onClick={() => void runAction(account, { id: account.id, action: 'models' })}><RefreshCw size={13} />刷新模型</Button>{provider?.loginModes.length ? <Button size="sm" disabled={accountBusy} onClick={() => setDialog({ kind: 'login', provider, accountId: account.id })}>重新登录</Button> : null}<Button size="sm" variant="ghost" disabled={accountBusy} onClick={() => setDialog({ kind: 'test', account })}>手动测试（耗额度）</Button><Button size="sm" variant="ghost" disabled={accountBusy} onClick={() => setDialog({ kind: 'reset', account })}>重置状态</Button>{busyIds.has(account.id) && <Spinner />}</div>
                 {outcome && <div aria-live="polite" className="space-y-2"><Notice tone={outcome.state === 'error' ? 'bad' : outcome.state === 'ok' ? 'ok' : 'accent'}>{outcome.text}</Notice>{outcome.result?.results?.map((result, resultIndex) => <div key={`${result.id}-${resultIndex}`} className="flex flex-wrap items-center gap-2 text-[12px]"><Badge tone={result.claimed || result.alreadyClaimed ? 'ok' : 'bad'}>{result.alreadyClaimed ? '已领过' : result.claimed ? '领取成功' : '未领取'}</Badge><span>{result.name} · 数量 {quantity(result.amount)}</span><span className="text-[var(--ink-3)]">{result.message}</span></div>)}</div>}
-                <CreditBalances credits={account.credits} staleError={creditErrors[account.id]} busy={accountBusy} onClaim={campaignId => claim(account, campaignId)} />
+                <CreditBalances credits={account.credits} staleError={creditErrors[account.id]} busy={accountBusy} machineMissing={!account.machineReady} onClaim={campaignId => claim(account, campaignId)} />
                 <div className="flex flex-wrap gap-x-4 gap-y-1 border-t border-[var(--line)] pt-2 text-[11.5px] text-[var(--ink-3)]"><span>模型 {modelList(account).length || '未知'} · 禁用 {account.disabledModels.length}</span><span>effort：{account.effort || '默认'}</span><span>Max Mode：{account.maxMode ? '开启' : '关闭'}</span><span>自动领取：{account.autoClaimAt || '关闭'}</span>{account.claimCooldownKind ? <span className="text-[var(--bad)]">签到冷却：{claimHoldText(account)}</span> : null}</div>
               </CardBody>
             </Card>
@@ -619,6 +739,8 @@ export function Credit() {
         </section>
       </div>
       {dialog?.kind === 'import' && <CredentialDialog onClose={() => setDialog(null)} onDone={refresh} />}
+      {dialog?.kind === 'machine' && <MachineDialog machine={data?.machine} onClose={() => setDialog(null)} onDone={refresh} />}
+      {dialog?.kind === 'machineClear' && <ConfirmDialog title="清除设备身份" label="确认清除" danger onClose={() => setDialog(null)} onConfirm={async () => { const result = await creditApi.machine({ machineToken: '', machineType: '' }); if (!result.ok) throw new Error('清除未成功。'); refresh(); toast.ok('已清除全局设备身份') }}><Notice tone="warn">清除之后 Qoder 的每日签到会领不到，上游也不再下发「每日签到」这一项；只有凭据里自带成对 machineToken / machineType 的账号不受影响。重新导入即可恢复。</Notice></ConfirmDialog>}
       {dialog?.kind === 'export' && <ExportDialog onClose={() => setDialog(null)} />}
       {dialog?.kind === 'edit' && <AccountSettings account={dialog.account} models={modelList(dialog.account)} onClose={() => setDialog(null)} onSave={update} />}
       {dialog?.kind === 'delete' && <ConfirmDialog title="删除账户" label="确认删除" danger onClose={() => setDialog(null)} onConfirm={async () => { const result = await creditApi.delete(dialog.account.id); if (!result.ok) throw new Error('删除未成功'); refresh(); toast.ok('账户已删除') }}><Notice tone="warn">确定删除“{dialog.account.name}”？这会移除保存在此服务中的账户凭据，无法撤销，不会注销官方账户。</Notice></ConfirmDialog>}
