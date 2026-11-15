@@ -33,11 +33,6 @@
 # 设备身份文件里是 machineToken 原值 —— 等同凭据，不管落在哪个目录都不进仓库。
 qoder-machine-identity.json
 
-# ── 一次性的重构/审计脚本 ──
-/tools/trim-comments.py
-/tools/trim-fields.py
-/tools/find-dup-comments.py
-
 # `internal/server/web/dist` 是 go:embed 的输入，但里面的产物是 vite 生成的。
 # 只保留占位文件，让没装 Node 的人也能 `go build`。
 /internal/server/web/dist/*
