@@ -5,7 +5,10 @@
 *.sh text eol=lf
 
 # Windows 批处理保持 CRLF。
+# .cmd 同理：cmd.exe 读 LF-only 批处理偶尔会跳行/丢尾，而且换行符一改，
+# 双击跑起来的就不是我们验过的那份了。
 *.bat text eol=crlf
+*.cmd text eol=crlf
 
 # 二进制文件不做换行转换。
 *.png binary
