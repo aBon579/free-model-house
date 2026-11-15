@@ -2,32 +2,38 @@
 #
 # 干什么：
 #   调本机 Qoder 客户端自带的 umid 生成器（runtime-info.exe），拿回这台机器真实的
-#   machineToken / machineType，然后推给 FMH 网关存成全局一份。
+#   machineToken / machineType，写成一个 JSON 文件；你把这个文件导入 FMH 网关，
+#   网关把它存成全局一份。
 #
 # 为什么要在本机跑：这两个值是**设备指纹签名**，不是账号凭据的一部分 ——
 #   网关在 NAS / 容器里没有客户端，也生成不出来；而它跟登录哪个账号无关
 #   （实测同一个 exe 换个 environment 参数就会吐出另一套「备用身份」，上游只认
 #   IDE 用的那套，所以第一个参数 3 不能省）。
 #
-# 用法：
-#   推给 NAS：  .\qoder-machine-identity.ps1 -Gateway http://192.168.1.20:8080
-#   只看结果：  .\qoder-machine-identity.ps1
-#   存成文件：  .\qoder-machine-identity.ps1 -PrintJson -OutFile .\machine_identity.json
-#   指定 exe：  .\qoder-machine-identity.ps1 -Exe "E:\Qoder\resources\umid\runtime-info.exe" -Gateway ...
+# 用法（默认就是"生成一个文件"，不用加参数）：
+#   .\qoder-machine-identity.ps1
+#     → 在脚本同目录覆盖写 qoder-machine-identity.json，然后到 FMH 的 Credit 页
+#       「Qoder 设备身份」→「导入」→ 选这个文件，点保存。浏览器直接读本地文件，
+#       不经过网络，也不用把管理台密码打到命令行里。
+#   存到别处：  .\qoder-machine-identity.ps1 -OutFile D:\tmp\qoder.json
+#   只看结果：  .\qoder-machine-identity.ps1 -NoFile -PrintJson
+#   懒得开弹窗：.\qoder-machine-identity.ps1 -Gateway http://192.168.1.20:8080   # 要输密码，走明文 HTTP
+#   指定 exe：  .\qoder-machine-identity.ps1 -Exe "E:\Qoder\resources\umid\runtime-info.exe"
 #
 # 什么时候要重跑：这两值是每次现生成的，客户端升级或过一段时间可能换成另一份；
 #   如果 Credit 页里「每日签到」又不见了、或签到报「上游未确认领取成功」，
-#   在本机重跑一次带 -Gateway 的命令行即可（网关只留最新一份，不用手工清）。
+#   重跑一次脚本再导入即可（文件每次被覆盖，网关也只留最新一份，不用手工清）。
 #
-# 密码默认交互输入（不落命令行历史）。要非交互就加 -Password 'xxx'。
+# 用 -Gateway 时密码默认交互输入（不落命令行历史）。要非交互就加 -Password 'xxx'。
 
 [CmdletBinding()]
 param(
-    [string]$Gateway,                       # 例：http://192.168.1.20:8080 ；留空则只读不推
+    [string]$OutFile,                       # 身份文件写到哪；留空 = 脚本同目录 qoder-machine-identity.json
+    [switch]$NoFile,                        # 一个文件都不生成（只想直接推网关时用）
+    [switch]$PrintJson,                     # 顺带打印可直接粘进 FMH「导入设备身份」的 JSON
+    [string]$Gateway,                       # 例：http://192.168.1.20:8080 ；给了才推送，否则只生成文件
     [string]$Exe,                           # runtime-info.exe 路径，留空则自动找
-    [string]$Password,                      # 管理台密码；留空则安全提示输入
-    [switch]$PrintJson,                     # 打印可直接粘进 FMH「导入设备身份」的 JSON
-    [string]$OutFile                        # 把该 JSON 写进文件（含原值，注意保存）
+    [string]$Password                       # 管理台密码；仅 -Gateway 时用，留空则安全提示输入
 )
 
 $ErrorActionPreference = 'Stop'
@@ -93,6 +99,18 @@ function Format-Hint {
     return $Value.Substring(0, 6) + '…' + $Value.Substring($Value.Length - 4)
 }
 
+function Get-IdentityJson {
+    param($Identity)
+    # 包在 machineIdentity 块里：FMH 页面的「导入」认这个键（裸的一对也认）。
+    # generatedAt 只是给人看的——文件放久了身份可能已被客户端换掉，那时再导旧文件，
+    # 症状跟没配一样：上游不下发「每日签到」。
+    return ([ordered]@{
+        machineIdentity = [ordered]@{ machineToken = $Identity.machineToken; machineType = $Identity.machineType }
+        machineCode     = $Identity.machineCode
+        generatedAt     = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    } | ConvertTo-Json -Compress)
+}
+
 $exePath = Find-RuntimeInfo -Hint $Exe
 Write-Host "设备身份生成器：$exePath"
 $identity = Get-MachineIdentity -Path $exePath
@@ -103,22 +121,34 @@ if ($identity.accountOutcome -and $identity.accountOutcome -ne 'success') {
     Write-Host ("accountOutcome={0}：这两个值与账号无关，属正常，继续。" -f $identity.accountOutcome)
 }
 
-if ($PrintJson -or $OutFile) {
-    $payload = '{"machineToken":"' + $identity.machineToken + '","machineType":"' + $identity.machineType + '"}'
-    if ($PrintJson) {
-        Write-Host ''
-        Write-Host '下面这段可以直接粘进 FMH 的「导入设备身份」：'
-        Write-Host $payload
-    }
-    if ($OutFile) {
-        Set-Content -LiteralPath $OutFile -Value $payload -Encoding UTF8 -NoNewline
-        Write-Host "已写入：$OutFile（内含原值，请当凭据一样保管）" -ForegroundColor Yellow
-    }
+$payload = Get-IdentityJson -Identity $identity
+
+if (-not $NoFile) {
+    $dir = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+    $target = if ($OutFile) { $OutFile } else { Join-Path $dir 'qoder-machine-identity.json' }
+    if (-not [IO.Path]::IsPathRooted($target)) { $target = Join-Path (Get-Location).Path $target }
+    $parent = Split-Path -Parent $target
+    if ($parent -and -not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+    # 显式 UTF-8 无 BOM：Set-Content -Encoding UTF8 会在文件头留一个 BOM，页面虽然能剥掉，
+    # 但别的 JSON 读法会当场解析失败。
+    [IO.File]::WriteAllText($target, $payload, (New-Object Text.UTF8Encoding($false)))
+    Write-Host ''
+    Write-Host "身份文件已生成：$target" -ForegroundColor Green
+    Write-Host '下一步：FMH 的 Credit 页 →「Qoder 设备身份」→「导入」→ 选这个文件 → 保存。'
+    Write-Host '浏览器直接读本地文件，不经过网络；这个文件里是原值，请当凭据一样保管。' -ForegroundColor Yellow
+}
+
+if ($PrintJson) {
+    Write-Host ''
+    Write-Host '下面这段可以直接粘进 FMH 的「导入设备身份」：'
+    Write-Host $payload
 }
 
 if (-not $Gateway) {
-    Write-Host ''
-    Write-Host '没有指定 -Gateway，所以只读取、未推送到网关。' -ForegroundColor DarkGray
+    if ($NoFile) {
+        Write-Host ''
+        Write-Host '加了 -NoFile 又没给 -Gateway，所以这次什么都没写。' -ForegroundColor DarkGray
+    }
     return
 }
 

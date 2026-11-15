@@ -30,6 +30,9 @@
 /tools/reference-qoder/
 /tools/reference-trae-zcode/
 
+# 设备身份脚本默认落在自己旁边，里面是 machineToken 原值 —— 等同凭据，不进仓库。
+/tools/qoder-machine-identity.json
+
 # ── 一次性的重构/审计脚本 ──
 /tools/trim-comments.py
 /tools/trim-fields.py

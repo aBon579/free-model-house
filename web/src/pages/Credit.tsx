@@ -64,7 +64,7 @@ function needsMachine(provider: ProviderId) {
 
 /**
  * 从一段文本里解出成对的设备身份，三种来源都认：
- * PC 脚本 -OutFile 存的裸 JSON、FMH 备份里的 machineIdentity 块、旧的逐账户 credential。
+ * PC 脚本生成的身份文件（machineIdentity 块）、FMH 完整备份、旧的逐账户 credential。
  * 解不出来返回 null（边输入边判断用，不能抛错）。
  */
 function machineFromText(raw: string): MachineIdentity | null {
@@ -256,7 +256,7 @@ function MachineDialog({ machine, onClose, onDone }: { machine?: MachineStatus; 
   async function submit() {
     await op.run(async () => {
       // found 为空时按钮是禁用的；这一句是给"绕过按钮"的调用者兜底，顺便把话说清楚。
-      if (!found) throw new Error('没读出一对 machineToken / machineType：请粘脚本 -PrintJson 打出的那段 JSON，或选它 -OutFile 存的 .json 文件。')
+      if (!found) throw new Error('没读出一对 machineToken / machineType：请选 PC 脚本生成的 qoder-machine-identity.json，或粘它 -PrintJson 打出的那段 JSON。')
       const result = await creditApi.machine(found)
       setText('')
       onDone()
@@ -268,14 +268,14 @@ function MachineDialog({ machine, onClose, onDone }: { machine?: MachineStatus; 
     <Modal title="导入 Qoder 设备身份" onClose={onClose} busy={op.busy}>
       <Notice>每日领取要的一对请求头（Cosy-MachineToken / Cosy-MachineType）。它由 Qoder 客户端在<b>你这台电脑</b>上算出来，和登录哪个账号无关；网关跑在 NAS 上没有客户端，只能由电脑送一份过来，全局存一份共用。</Notice>
       <Notice tone="warn">原值只进不出：这个接口发给你自己的网关这一次，页面不显示也不保存它（账户快照每 30 秒轮询一次，带上原值等于把凭据挂在列表里）。不要伪造这两个值。</Notice>
-      <Notice>怎么拿：在装有 Qoder 客户端的电脑上运行 <span className="mono">tools/qoder-machine-identity.ps1 -PrintJson</span>，把打印出的那段 JSON 粘到下面；给脚本加 <span className="mono">-Gateway http://网关地址</span> 就让它自己推过来，不用开这个弹窗。</Notice>
+      <Notice>怎么拿：在装有 Qoder 客户端的电脑上运行 <span className="mono">tools/qoder-machine-identity.ps1</span>，它默认在脚本同目录覆盖生成 <span className="mono">qoder-machine-identity.json</span> —— 用下面的「从 JSON 文件读取」选它就行，原值不经网络。身份会随客户端升级换新，所以只导刚跑出来的那一份。</Notice>
       <SecretIntake
         busy={op.busy}
         value={text}
         onChange={setText}
         fileName={fileName}
         onFile={file => void op.run(async () => { setText(await readJSONFile(file)); setFileName(file.name) })}
-        hint='认这三种：{"machineToken":"…","machineType":"…"}、完整备份里的 machineIdentity 块、带这两个字段的旧 credential。'
+        hint='认这三种：PC 脚本生成的身份文件、完整备份（含 machineIdentity 块）、带这两个字段的旧 credential。也可手工粘 {"machineToken":"…","machineType":"…"}。'
         secretLabel="设备身份 JSON"
         fileLabel="设备身份 JSON 文件"
       />
@@ -716,7 +716,7 @@ export function Credit() {
             </div>
             {data?.machine?.configured
               ? <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11.5px] text-[var(--ink-3)]"><span className="mono">指纹：{data.machine.hint || '未知'}</span><span>写入于 {date(data.machine.updatedAt)}</span><span>全局共用一份；凭据里自带成对值的账号用自己的。</span></div>
-              : <Notice tone="warn">还没有设备身份。上游缺这两个头时不会下发「每日签到」，签到也就一定领不到 —— 这不代表你的账号没有活动。在装有 Qoder 客户端的电脑上跑 <span className="mono">tools/qoder-machine-identity.ps1 -Gateway {window.location.origin}</span>，或点右上「导入」粘贴脚本给出的 JSON。</Notice>}
+              : <Notice tone="warn">还没有设备身份。上游缺这两个头时不会下发「每日签到」，签到也就一定领不到 —— 这不代表你的账号没有活动。在装有 Qoder 客户端的电脑上跑 <span className="mono">tools/qoder-machine-identity.ps1</span>，它会在脚本同目录生成 <span className="mono">qoder-machine-identity.json</span>；点右上「导入」选这个文件即可。</Notice>}
           </CardBody></Card>}
           <div className="flex flex-wrap items-center justify-between gap-3"><h2 className="text-[15px] font-semibold text-[var(--ink)]">{channel.name} 账户</h2><div className="flex flex-wrap gap-2"><Button size="sm" disabled={query.isFetching} onClick={() => void query.refetch()}>{query.isFetching ? <Spinner /> : <RefreshCw size={13} />}刷新列表</Button><Button size="sm" disabled={batch || !visible.some(a => a.enabled && !busy(a))} onClick={() => void batchClaim()}>{batch ? <Spinner /> : <Gift size={13} />}{batch ? '逐号签到中…' : '本渠道批量签到'}</Button><Button size="sm" variant="primary" disabled={!provider?.loginModes.length} onClick={() => { if (provider) setDialog({ kind: 'login', provider }) }}><ExternalLink size={13} />浏览器登录</Button></div></div>
           {query.isLoading ? <Card><Loading label="正在加载 Credit 账户…" /></Card> : !visible.length && data ? <Card><Empty icon={<Wallet size={32} />} title={`还没有 ${channel.name} 账户`} description={`点上方「浏览器登录」连接你的 ${channel.name} 账户。未添加账户时不会查询上游，也不会测试模型。`} /></Card> : visible.map((account, index) => {
