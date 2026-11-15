@@ -43,37 +43,79 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+function Get-UmidExeName { return @('runtime-info.exe', 'runtime-info') }
+
+function Get-ClientDirName { return @('Qoder', 'Qoder CN', 'qoder') }
+
 function Find-RuntimeInfo {
     param([string]$Hint)
     if ($Hint) {
         if (-not (Test-Path -LiteralPath $Hint)) { throw "指定的文件不存在：$Hint" }
         return (Resolve-Path -LiteralPath $Hint).Path
     }
-    $roots = @()
-    if ($env:USERPROFILE) { $roots += (Join-Path $env:USERPROFILE '.qoder\.bin') }
-    $home2 = if ($env:HOME) { $env:HOME } else { $env:USERPROFILE }
-    if ($home2) { $roots += (Join-Path $home2 '.qoder/.bin') }
-    $search = @()
-    foreach ($r in $roots) {
-        if (Test-Path -LiteralPath $r) {
-            $search += Get-ChildItem -LiteralPath $r -Directory -Filter 'umid-*' -ErrorAction SilentlyContinue |
-                ForEach-Object { Join-Path $_.FullName 'runtime-info.exe' }
+    $exeNames = Get-UmidExeName
+    $clientNames = Get-ClientDirName
+
+    # 客户端数据目录里的那一份：~/.qoder/.bin/umid-<平台>-<架构>-<hash>/runtime-info.exe
+    $dataDirs = @()
+    # 循环变量别叫 $home —— PowerShell 里 HOME 是只读自动变量，赋值会直接抛 VariableNotWritable。
+    foreach ($userHome in @($env:USERPROFILE, $env:HOME)) {
+        if ($userHome) { $dataDirs += (Join-Path $userHome '.qoder\.bin') }
+    }
+    foreach ($local in @($env:LOCALAPPDATA, $env:APPDATA)) {
+        if ($local) { $dataDirs += (Join-Path $local 'qoder\.bin'), (Join-Path $local 'Qoder\.bin') }
+    }
+    foreach ($dir in $dataDirs) {
+        if (-not (Test-Path -LiteralPath $dir)) { continue }
+        foreach ($sub in Get-ChildItem -LiteralPath $dir -Directory -Filter 'umid-*' -ErrorAction SilentlyContinue) {
+            foreach ($exe in $exeNames) {
+                $cand = Join-Path $sub.FullName $exe
+                if (Test-Path -LiteralPath $cand) { return (Resolve-Path -LiteralPath $cand).Path }
+            }
         }
     }
-    # 客户端安装目录里也有一份（本机上实测存在）
-    $installDirs = @()
-    foreach ($base in @($env:LOCALAPPDATA, ${env:ProgramFiles}, ${env:ProgramFiles(x86)}, 'C:\', 'D:\', 'E:\')) {
-        if (-not $base) { continue }
-        foreach ($name in @('Qoder', 'Qoder CN')) {
-            $installDirs += (Join-Path $base (Join-Path $name 'resources\umid\runtime-info.exe'))
-            $installDirs += (Join-Path $base (Join-Path $name 'resources\umid\runtime-info'))
+
+    # 第一轮只查"有标准答案"的位置：注册表与 Shell API 会给本机真实的安装目录，
+    # 换一台机器、换一种界面语言都不用改这里 —— 写死 C:\ D:\ E:\ 是错的，
+    # 系统盘未必是 C:，Program Files 也未必在系统盘上。
+    $bases = @()
+    foreach ($folder in @('ProgramFiles', 'ProgramFilesX86', 'CommonProgramFiles')) {
+        # 老框架上未必有 ProgramFilesX86 这个枚举值；取不到就跳过，不能让脚本死在这。
+        try { $p = [Environment]::GetFolderPath($folder) } catch { $p = $null }
+        if ($p) { $bases += $p }
+    }
+    foreach ($p in @(${env:ProgramFiles}, ${env:ProgramFiles(x86)}, $env:LOCALAPPDATA, $env:APPDATA, $env:SystemDrive)) {
+        if ($p) { $bases += $p }
+    }
+    foreach ($base in $bases) {
+        foreach ($name in $clientNames) {
+            foreach ($exe in $exeNames) {
+                $cand = Join-Path $base (Join-Path $name (Join-Path 'resources\umid' $exe))
+                if (Test-Path -LiteralPath $cand) { return (Resolve-Path -LiteralPath $cand).Path }
+            }
         }
     }
-    $search += $installDirs
-    foreach ($cand in $search) {
-        if ($cand -and (Test-Path -LiteralPath $cand)) { return (Resolve-Path -LiteralPath $cand).Path }
+
+    # 第二轮才扫盘：绿色版解压到任意目录是常见情况。限制深度、跳过光驱和可移动盘，
+    # 免得插着 U 盘或挂载着 NAS 时白等；这一轮只在前面都没命中时才付出代价。
+    foreach ($d in [IO.DriveInfo]::GetDrives()) {
+        try {
+            if (-not $d.IsReady) { continue }
+            if ($d.DriveType -eq 'Removable' -or $d.DriveType -eq 'Cd' -or $d.DriveType -eq 'Ram') { continue }
+            $root = $d.RootDirectory.FullName
+        }
+        catch { continue }
+        $found = Get-ChildItem -LiteralPath $root -Directory -Filter 'Qoder*' -Depth 2 -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                foreach ($exe in $exeNames) {
+                    $cand = Join-Path $_.FullName (Join-Path 'resources\umid' $exe)
+                    if (Test-Path -LiteralPath $cand) { return (Resolve-Path -LiteralPath $cand).Path }
+                }
+            } | Select-Object -First 1
+        if ($found) { return $found }
     }
-    throw "没找到 runtime-info.exe。在装有 Qoder 客户端的机器上它通常在 `~\.qoder\.bin\umid-win32-x64-<hash>\` 或安装目录 resources\umid\ 下；也可以用 -Exe 直接指路径。"
+
+    throw "没找到 runtime-info.exe。它随 Qoder 客户端安装，通常在 <用户目录>\\.qoder\\.bin\\umid-<平台>-<架构>-<hash>\\ 或安装目录 resources\\umid\\ 下；确认这台电脑装过客户端，或用 -Exe 直接指到那个 exe。"
 }
 
 function Get-MachineIdentity {
@@ -110,14 +152,16 @@ function Get-IdentityFilePath {
         if ([IO.Path]::IsPathRooted($Override)) { return $Override }
         return Join-Path (Get-Location).Path $Override
     }
-    # 桌面用 Shell API 取，不能拼 $env:USERPROFILE\Desktop：开了 OneDrive「已知文件夹重定向」
-    # 的机器上真实桌面在 %USERPROFILE%\OneDrive\Desktop，拼出来的那个目录存在但不在桌面上，
-    # 用户在桌面找不到文件就等于没生成。桌面取不到退回文档，再退回临时目录。
+    # 桌面必须用 Shell API 取，不能拼 $env:USERPROFILE\Desktop：OneDrive「已知文件夹重定向」、
+    # 组策略改过已知文件夹、或干脆把桌面挪到别的盘的机器上，真实桌面在别处，而拼出来的那个
+    # 目录往往**也存在**——文件写进去了却看不见，对使用者来说就等于没生成。
+    # 也不做 Test-Path 门槛：路径合法但目录还没建时，直接建出来才是他要的那个桌面
+    # （非 ASCII 的桌面名无所谓，全程走 -LiteralPath）。
     foreach ($folder in @('Desktop', 'Personal')) {
-        $dir = [Environment]::GetFolderPath($folder)
-        if ($dir -and (Test-Path -LiteralPath $dir)) { return Join-Path $dir 'qoder-machine-identity.json' }
+        try { $dir = [Environment]::GetFolderPath($folder) } catch { $dir = $null }
+        if ($dir) { return Join-Path $dir 'qoder-machine-identity.json' }
     }
-    Write-Host '没找到桌面或文档目录，身份文件改放临时目录（重启后可能被清理，导入完就删掉它）。' -ForegroundColor Yellow
+    Write-Host '没拿到桌面或文档目录，身份文件改放临时目录（重启后可能被清理，导入完就删掉它）。' -ForegroundColor Yellow
     return Join-Path $env:TEMP 'qoder-machine-identity.json'
 }
 
