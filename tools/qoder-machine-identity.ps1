@@ -148,4 +148,4 @@ if (-not $resp.ok) { throw "网关没接受这次写入：$($resp | ConvertTo-Js
 
 Write-Host ''
 Write-Host ("已推送到 {0}；网关现存身份：{1}" -f $base, $resp.machine.hint) -ForegroundColor Green
-Write-Host '回到 Credit 页点一次「查询余额」，活动清单里应该多出「每日签到 · 100」。'
+Write-Host '回到 Credit 页点一次「查询余额」，活动清单里应该多出「每日签到」那一项。'
