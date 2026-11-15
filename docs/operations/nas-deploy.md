@@ -60,7 +60,7 @@ ssh user@nas-ip "cd ~/fmh && docker compose logs -f fmh"
 
 ```
 部署包/
-├── dist/               ← 镜像的全部内容：out/fmh、web/dist/、ca-certificates.crt、zoneinfo/、passwd、group
+├── dist/               ← 镜像的全部内容，正好 5 样：out/fmh、ca-certificates.crt、zoneinfo/、passwd、group
 ├── Dockerfile.offline
 ├── Dockerfile.offline.dockerignore
 ├── docker-compose.yml  ← 指向 Dockerfile.offline（仓库那份指向在线 Dockerfile，两份不一样）
@@ -68,6 +68,9 @@ ssh user@nas-ip "cd ~/fmh && docker compose logs -f fmh"
 ├── README.md · LICENSE
 └── docs/operations/    ← nas-deploy.md · lan-access.md
 ```
+
+界面不单独出现在包里 —— 它编译时就进了 `out/fmh`（`go:embed`），
+所以 `dist/` 里没有 `web/`，`Dockerfile.offline` 的 5 条 COPY 也没有它。
 
 要改代码重编就选 A：`cmd/ internal/ web/ vendor/ go.mod` 都在仓库里。
 部署包里放这些只会让包变大、核对变难，所以同步脚本按清单把它们挡在外面。
@@ -341,6 +344,7 @@ docker.io/library/node:22-alpine: ... 401 Unauthorized
 sudo systemctl restart docker
 
 # ② 或者：完全不用 Docker —— 在别处交叉编译好二进制传过去
+#    （`scripts/` 只在源码仓库里，部署包不含它）
 ./scripts/build-linux.sh amd64    # 生成 fmh-linux-amd64（11.6 MB，纯静态）
 scp fmh-linux-amd64 user@<NAS-IP>:~/
 ```

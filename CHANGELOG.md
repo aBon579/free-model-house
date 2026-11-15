@@ -29,13 +29,16 @@
   在 Credit 页「设备身份」→「导入」选它即可，原值不经网络、也不会被回显。
   领取结果分三种说法：缺设备身份 / 清单里没有可领项 / 上游记着已领。
 - **余额查询主动补一发** —— 进 Credit 页或切渠道时自动查一次余额，不用手点。
-- **部署包瘦成"离线运行最小集"** —— 部署包清单只留 `dist/`、
-  `Dockerfile.offline` 及其专用 ignore、指向它的 `docker-compose.yml`、`.env.example`、
-  README/LICENSE 和两篇运维文档；源码、`vendor/`、在线 `Dockerfile`、打包脚本都不再进包
-  （实测 36.7 MB / 1513 文件 → 18.6 MB / 618 文件，裁掉的 894 个文件连同 86 个空目录）。
+- **部署包瘦成"离线运行最小集"** —— 部署包清单只留 `Dockerfile.offline` 真正 COPY 的
+  那 5 样（`dist/out/fmh`、`dist/ca-certificates.crt`、`dist/zoneinfo/`、`dist/passwd`、
+  `dist/group`）加 `Dockerfile.offline` 及其专用 ignore、指向它的 `docker-compose.yml`、
+  `.env.example`、README/LICENSE 和两篇运维文档；源码、`vendor/`、在线 `Dockerfile`、
+  打包脚本都不再进包（实测 36.7 MB / 1513 文件 → 17.1 MB / 610 文件）。
   要改代码重编走 `git clone`。
-  顺带堵掉一个坑：仓库那份 `.dockerignore` 写死了 `/dist` 排除，而旧版（非 BuildKit）builder
-  只认这一份 ignore —— 它跟着进包会让离线构建的 `COPY dist/` 落空，所以必须不在包里。
+  顺带堵掉两个坑：① 仓库那份 `.dockerignore` 写死了 `/dist` 排除，而旧版（非 BuildKit）builder
+  只认这一份 ignore —— 它跟着进包会让离线构建的 `COPY dist/` 落空，所以必须不在包里；
+  ② 打包顺带拷进 `dist/web/dist/` 的那 8 个文件从没进过镜像 —— 界面是 `go:embed` 编译时
+  打进 `out/fmh` 的，容器里没有第二份，留着只会让人以为部署还得单独摆一份前端。
   `docs/operations/nas-deploy.md` 里"上传整个文件夹 + `vendor/` 供离线构建"那段本来就和
   包内 compose 指向 `Dockerfile.offline` 自相矛盾，改成 A 克隆 / B 部署包 / C 现成镜像三条路。
 
@@ -51,6 +54,11 @@
 
 ### 修复
 
+- **打包顺序反了会带上一轮的界面** —— 打包脚本先编译二进制、再看前端要不要重建，
+  而界面是编译时嵌进二进制的：这样跑出来的包，装的是**上一轮**的页面
+  （症状是"改了页面但部署上去没变"）。现在前端先就位再编译，并且缺
+  `internal/server/web/dist/index.html` 直接中止 —— 那个目录里有个占位文件，
+  空目录也照样能编译过，放任不管就是"容器照跑、管理台全 404"。
 - **TRAE 授权链接第一屏报「登录失败」** —— `client_id` 曾被当成每次登录现编的
   随机值发出去，而授权页第一屏就按它判决客户端，连输手机号那一屏都到不了；
   改成产品常量，`login_trace_id` 也按官方规则由设备号派生。
