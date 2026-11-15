@@ -29,6 +29,15 @@
   在 Credit 页「设备身份」→「导入」选它即可，原值不经网络、也不会被回显。
   领取结果分三种说法：缺设备身份 / 清单里没有可领项 / 上游记着已领。
 - **余额查询主动补一发** —— 进 Credit 页或切渠道时自动查一次余额，不用手点。
+- **部署包瘦成"离线运行最小集"** —— 部署包清单只留 `dist/`、
+  `Dockerfile.offline` 及其专用 ignore、指向它的 `docker-compose.yml`、`.env.example`、
+  README/LICENSE 和两篇运维文档；源码、`vendor/`、在线 `Dockerfile`、打包脚本都不再进包
+  （实测 36.7 MB / 1513 文件 → 18.6 MB / 618 文件，裁掉的 894 个文件连同 86 个空目录）。
+  要改代码重编走 `git clone`。
+  顺带堵掉一个坑：仓库那份 `.dockerignore` 写死了 `/dist` 排除，而旧版（非 BuildKit）builder
+  只认这一份 ignore —— 它跟着进包会让离线构建的 `COPY dist/` 落空，所以必须不在包里。
+  `docs/operations/nas-deploy.md` 里"上传整个文件夹 + `vendor/` 供离线构建"那段本来就和
+  包内 compose 指向 `Dockerfile.offline` 自相矛盾，改成 A 克隆 / B 部署包 / C 现成镜像三条路。
 
 ### 变更
 

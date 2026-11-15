@@ -42,31 +42,43 @@ ssh user@nas-ip "cd ~/fmh && docker compose logs -f fmh"
 
 ## 1. 把项目放到 NAS 上
 
-### 要上传哪个？
+### 要传哪个？
 
-**`Free Mdel House` 这一个文件夹**，整个传。
+三条路，传的东西不一样，先选一条：
 
-它包含 Docker 构建需要的一切：
+| 拿法 | 传什么到 NAS | 构建走哪份 | 适用 |
+|---|---|---|---|
+| **A：`git clone` 整个仓库**（推荐） | 仓库本身 | 在线 `Dockerfile`（node → golang → scratch 三阶段） | 想改代码、想跟版本走 |
+| **B：部署包**（约 19 MB） | 那一个文件夹 | `Dockerfile.offline`（`FROM scratch`，只拷 `dist/` 里的预编译产物，**一张基础镜像都不拉**） | NAS 拉不动镜像、只想把东西跑起来 |
+| **C：现成镜像** | 只传 compose | 不构建，`docker compose up -d` 拉 GHCR | 网络通、最省事 |
+
+三条路的运行结果一模一样，区别只在于**编译发生在谁的机器上**。
+
+⚠️ **不需要在 NAS 上装 Go 或 Node** —— A 和 B 的编译都在容器里完成（A 在 node/golang 阶段，B 根本不编译）。
+
+部署包长这样（**没有源码**，这是有意的）：
 
 ```
-Free Mdel House/
-├── Dockerfile          ← 构建脚本
-├── .dockerignore
-├── docker-compose.yml  ← 编排
+部署包/
+├── dist/               ← 镜像的全部内容：out/fmh、web/dist/、ca-certificates.crt、zoneinfo/、passwd、group
+├── Dockerfile.offline
+├── Dockerfile.offline.dockerignore
+├── docker-compose.yml  ← 指向 Dockerfile.offline（仓库那份指向在线 Dockerfile，两份不一样）
 ├── .env.example
-├── go.mod / go.sum     ← Go 依赖
-├── cmd/fmh/            ← 入口
-├── internal/           ← 后端源码
-├── web/                ← 前端源码（+ package.json / package-lock.json）
-├── docs/  README.md    ← 文档（不影响构建）
-└── vendor/             ← 依赖源码（离线构建用）
+├── README.md · LICENSE
+└── docs/operations/    ← nas-deploy.md · lan-access.md
 ```
 
-⚠️ **不要**单独传 `internal/` 或 `web/` —— 缺了 Dockerfile 就没法构建。
+要改代码重编就选 A：`cmd/ internal/ web/ vendor/ go.mod` 都在仓库里。
+部署包里放这些只会让包变大、核对变难，所以同步脚本按清单把它们挡在外面。
+
+⚠️ **别把仓库那份 `.dockerignore` 塞进部署包** —— 它按在线构建写死了 `/dist` 排除，
+   而旧版（非 BuildKit）builder 只认 `.dockerignore`、不认 `Dockerfile.offline.dockerignore`；
+   两个文件同时在场，那条 `/dist` 会让离线 COPY 找不到东西，构建直接失败。
 
 ### 怎么传
 
-**方式 A：git clone（推荐）**
+**A：git clone**
 
 ```bash
 git clone https://github.com/aBon579/free-model-house
@@ -75,12 +87,11 @@ cd free-model-house
 
 `node_modules` 由镜像里的 `npm ci` 安装，`data/` 是本机运行时数据 —— 都不需要手动传。
 
-**方式 B：用镜像**
+**B：部署包** —— `dist/` 已经编译好、整个文件夹传过去就行（约 19 MB，不含源码）。
+里面不需要 Go、不需要 Node，也不需要 NAS 能拉基础镜像；
+要自己产 `dist/` 就得在本机装 Go 与 Node（仓库里的 `scripts/build-linux.sh` 只出裸二进制，见 §1.5 末尾）。
 
-不想在 NAS 上构建的话，直接 `docker compose up -d` 拉 GHCR 上的镜像。
-
-⚠️ **不需要在 NAS 上装 Go 或 Node** ——
-   Dockerfile 里的三个阶段（node → golang → scratch）全在容器里跑。
+**C：现成镜像** —— 不想在 NAS 上构建的话，直接 `docker compose up -d` 拉 GHCR 上的镜像。
 
 ---
 
@@ -104,6 +115,8 @@ docker compose up -d
 📖 历史背景见 [`fnos-401.md`](./fnos-401.md)。
 
 ### ⚠️ 完全不用 Docker 的话（不依赖任何镜像源）
+
+这条路要自己编译，所以得走 A（`scripts/build-linux.sh` 只在仓库里，部署包不含 `scripts/`）：
 
 ```bash
 ./scripts/build-linux.sh amd64    # → 11.6 MB 纯静态二进制
