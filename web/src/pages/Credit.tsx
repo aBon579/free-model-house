@@ -484,6 +484,14 @@ function expiryMs(value?: CreditDate) {
 
 // 不同单位的余额不能相加（页头就写着「不合并不同单位的余额」），所以先按 unit 分块，
 // 块内再按 name 分类。签到奖励这类同名包只差到期日，一个个平铺正是「一堆未知」的观感来源。
+// 额度已经用完的包（剩余 0）留在明细里只会淹没还有额度那几个 —— 签到奖励按天发，
+// 攒下来的全是 0/100/100 这种既成事实。所以明细只列还没用完的包，
+// 「最早到期」也只在这些包里取：已经花完的包的到期日不需要你赶。
+// ⚠️ 剩余**未知**不等于用完 —— 未知按零处理是把没核实的事当结论，照旧列出。
+function usedUp(balance: Balance) {
+  return typeof balance.remaining === 'number' && Number.isFinite(balance.remaining) && balance.remaining <= 0
+}
+
 function summarize(balances: Balance[]) {
   const units = new Map<string, Map<string, Balance[]>>()
   for (const balance of balances) {
@@ -495,9 +503,12 @@ function summarize(balances: Balance[]) {
     units.set(unit, categories)
   }
   const group = (items: Balance[]) => {
-    const expiries = items.map(balance => expiryMs(balance.expiresAt)).filter((ms): ms is number => ms !== undefined)
+    const live = items.filter(balance => !usedUp(balance))
+    const expiries = live.map(balance => expiryMs(balance.expiresAt)).filter((ms): ms is number => ms !== undefined)
     return {
       items,
+      live,
+      usedUpCount: items.length - live.length,
       count: items.length,
       total: sumTotal(items),
       used: sumUsed(items),
@@ -526,15 +537,15 @@ function CreditBalances({ credits, staleError, busy, machineMissing, onClaim }: 
       {!units.length ? <p className="text-[12.5px] text-[var(--ink-3)]">上游没有返回余额明细，余额未知。</p> : units.map(unit => <div key={unit.unit} className="space-y-2">
         <div className="flex flex-wrap items-end justify-between gap-2 rounded-[var(--r-sm)] border border-[var(--line)] bg-[var(--surface-2)] p-3">
           <div><div className="text-[11.5px] text-[var(--ink-3)]">合计剩余 · {unit.unit}</div><div className="text-[22px] font-semibold text-[var(--ink)]">{staleError ? '未知' : quantity(unit.remaining.value)}<Unknown count={unit.remaining.missing} /></div></div>
-          <div className="text-[11.5px] text-[var(--ink-3)]">{unit.count} 个额度包 · 总量 {quantity(unit.total.value)}<Unknown count={unit.total.missing} /> · 已用 {quantity(unit.used.value)}<Unknown count={unit.used.missing} />{unit.expired ? ` · 含 ${unit.expired} 个已到期` : ''}</div>
+          <div className="text-[11.5px] text-[var(--ink-3)]">{unit.count} 个额度包 · 总量 {quantity(unit.total.value)}<Unknown count={unit.total.missing} /> · 已用 {quantity(unit.used.value)}<Unknown count={unit.used.missing} />{unit.expired ? ` · 含 ${unit.expired} 个已到期` : ''}{unit.usedUpCount ? ` · 含 ${unit.usedUpCount} 个已用完` : ''}</div>
         </div>
         {unit.categories.map(category => <div key={category.name} className="space-y-2 rounded-[var(--r-sm)] border border-[var(--line)] p-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="text-[12.5px] font-medium text-[var(--ink)]">{category.name} <span className="text-[11.5px] font-normal text-[var(--ink-3)]">· {category.count} 个包</span>{category.expired ? <span className="text-[11.5px] font-normal text-[var(--warn)]"> · {category.expired} 个已到期</span> : null}</div>
             <div className="text-[15px] font-semibold text-[var(--ink)]">{staleError ? '未知' : quantity(category.remaining.value)} <span className="text-[11.5px] font-normal text-[var(--ink-3)]">{unit.unit} · 剩余</span></div>
           </div>
-          <div className="text-[11.5px] text-[var(--ink-3)]">总量 {quantity(category.total.value)} · 已用 {quantity(category.used.value)} · 最早到期 {date(category.earliest)}{category.remaining.missing ? ` · ${category.remaining.missing} 个包剩余未知，未计入` : ''}</div>
-          {category.count > 1 && <div className="space-y-1 border-t border-[var(--line)] pt-2">{category.items.map((balance, index) => <div key={`${balance.name}-${index}`} className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-[11.5px] text-[var(--ink-3)]"><span>{date(balance.expiresAt)}{expired(balance.expiresAt) && <Badge tone="warn" className="ml-1.5">已到期</Badge>}{staleError ? ` · 上次剩余 ${quantity(balance.remaining)}` : ''}</span><span>剩余 {quantity(balance.remaining)} · 总量 {quantity(balance.total)} · 已用 {quantity(balance.used)}</span></div>)}</div>}
+          <div className="text-[11.5px] text-[var(--ink-3)]">总量 {quantity(category.total.value)} · 已用 {quantity(category.used.value)} · {category.live.length ? `最早到期 ${date(category.earliest)}` : '没有还没用完的包'}{category.remaining.missing ? ` · ${category.remaining.missing} 个包剩余未知，未计入` : ''}{category.usedUpCount ? ` · ${category.usedUpCount} 个已用完，未列出` : ''}</div>
+          {category.live.length > 1 && <div className="space-y-1 border-t border-[var(--line)] pt-2">{category.live.map((balance, index) => <div key={`${balance.name}-${index}`} className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-[11.5px] text-[var(--ink-3)]"><span>{date(balance.expiresAt)}{expired(balance.expiresAt) && <Badge tone="warn" className="ml-1.5">已到期</Badge>}{staleError ? ` · 上次剩余 ${quantity(balance.remaining)}` : ''}</span><span>剩余 {quantity(balance.remaining)} · 总量 {quantity(balance.total)} · 已用 {quantity(balance.used)}</span></div>)}</div>}
         </div>)}
       </div>)}
       <div className="space-y-2 border-t border-[var(--line)] pt-3"><div className="text-[12.5px] font-medium">活动与每日领取</div>{!credits.campaigns?.length ? <p className="text-[12px] text-[var(--ink-3)]">{machineMissing ? '清单里没有可领活动，而这台网关还没有 Qoder 设备身份：缺它时上游压根不下发「每日签到」，所以这不代表你的账号没有活动。先在上方导入设备身份，再点一次「查询余额」。' : '未返回可展示活动；可尝试单号签到，以实际返回结果为准。'}</p> : credits.campaigns.map(campaign => <div key={campaign.id} className="flex flex-wrap items-center justify-between gap-2 rounded-[var(--r-sm)] border border-[var(--line)] p-2.5"><div><div className="text-[12.5px]">{campaign.name} · {quantity(campaign.amount)} <span className="text-[var(--ink-3)]">（活动额度，单位以上游为准）</span></div><div className="text-[11.5px] text-[var(--ink-3)]">到期 {date(campaign.expiresAt)}</div></div><Button size="sm" disabled={busy || campaign.claimed || !campaign.claimable || expired(campaign.expiresAt)} onClick={() => onClaim(campaign.id)}>{campaign.claimed ? '已领取' : expired(campaign.expiresAt) ? '已到期' : campaign.claimable ? '领取一次' : '不可领取'}</Button></div>)}</div>
