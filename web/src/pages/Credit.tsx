@@ -482,16 +482,19 @@ function expiryMs(value?: CreditDate) {
   return Number.isFinite(ms) && ms > 0 ? ms : undefined
 }
 
-// 不同单位的余额不能相加（页头就写着「不合并不同单位的余额」），所以先按 unit 分块，
-// 块内再按 name 分类。签到奖励这类同名包只差到期日，一个个平铺正是「一堆未知」的观感来源。
-// 额度已经用完的包（剩余 0）留在明细里只会淹没还有额度那几个 —— 签到奖励按天发，
-// 攒下来的全是 0/100/100 这种既成事实。所以明细只列还没用完的包，
-// 「最早到期」也只在这些包里取：已经花完的包的到期日不需要你赶。
+// 「签到奖励」是按天发的同名包，攒久了全是 0/100/100 这种既成事实，
+// 平铺在明细里只会淹没还有额度那几个 —— 所以只有这一类折叠掉用完的包，
+// 「最早到期」也只在这几包里取（已经花完的包的到期日不需要你赶）。
+// ⚠️ 其他卡片（新用户福利、免费、每月登录赠送…）是上游按情况下发的，一律原样列 ——
+//   那边"剩余 0"是有信息量的现状，不是噪音。
 // ⚠️ 剩余**未知**不等于用完 —— 未知按零处理是把没核实的事当结论，照旧列出。
+const CLAIM_REWARD = '签到奖励'
 function usedUp(balance: Balance) {
   return typeof balance.remaining === 'number' && Number.isFinite(balance.remaining) && balance.remaining <= 0
 }
 
+// 不同单位的余额不能相加（页头就写着「不合并不同单位的余额」），所以先按 unit 分块，
+// 块内再按 name 分类。折叠只作用在「签到奖励」那一类上，unit 层永远是全量。
 function summarize(balances: Balance[]) {
   const units = new Map<string, Map<string, Balance[]>>()
   for (const balance of balances) {
@@ -502,12 +505,13 @@ function summarize(balances: Balance[]) {
     categories.set(balance.name, items)
     units.set(unit, categories)
   }
-  const group = (items: Balance[]) => {
-    const live = items.filter(balance => !usedUp(balance))
+  const group = (items: Balance[], foldUsedUp: boolean) => {
+    const live = foldUsedUp ? items.filter(balance => !usedUp(balance)) : items
     const expiries = live.map(balance => expiryMs(balance.expiresAt)).filter((ms): ms is number => ms !== undefined)
     return {
       items,
       live,
+      foldUsedUp,
       usedUpCount: items.length - live.length,
       count: items.length,
       total: sumTotal(items),
@@ -519,7 +523,7 @@ function summarize(balances: Balance[]) {
   }
   return [...units].map(([unit, categories]) => {
     const all = [...categories.values()].flat()
-    return { unit, ...group(all), categories: [...categories].map(([name, items]) => ({ name, ...group(items) })) }
+    return { unit, ...group(all, false), categories: [...categories].map(([name, items]) => ({ name, ...group(items, name === CLAIM_REWARD) })) }
   })
 }
 
@@ -537,7 +541,7 @@ function CreditBalances({ credits, staleError, busy, machineMissing, onClaim }: 
       {!units.length ? <p className="text-[12.5px] text-[var(--ink-3)]">上游没有返回余额明细，余额未知。</p> : units.map(unit => <div key={unit.unit} className="space-y-2">
         <div className="flex flex-wrap items-end justify-between gap-2 rounded-[var(--r-sm)] border border-[var(--line)] bg-[var(--surface-2)] p-3">
           <div><div className="text-[11.5px] text-[var(--ink-3)]">合计剩余 · {unit.unit}</div><div className="text-[22px] font-semibold text-[var(--ink)]">{staleError ? '未知' : quantity(unit.remaining.value)}<Unknown count={unit.remaining.missing} /></div></div>
-          <div className="text-[11.5px] text-[var(--ink-3)]">{unit.count} 个额度包 · 总量 {quantity(unit.total.value)}<Unknown count={unit.total.missing} /> · 已用 {quantity(unit.used.value)}<Unknown count={unit.used.missing} />{unit.expired ? ` · 含 ${unit.expired} 个已到期` : ''}{unit.usedUpCount ? ` · 含 ${unit.usedUpCount} 个已用完` : ''}</div>
+          <div className="text-[11.5px] text-[var(--ink-3)]">{unit.count} 个额度包 · 总量 {quantity(unit.total.value)}<Unknown count={unit.total.missing} /> · 已用 {quantity(unit.used.value)}<Unknown count={unit.used.missing} />{unit.expired ? ` · 含 ${unit.expired} 个已到期` : ''}</div>
         </div>
         {unit.categories.map(category => <div key={category.name} className="space-y-2 rounded-[var(--r-sm)] border border-[var(--line)] p-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
