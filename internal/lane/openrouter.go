@@ -139,6 +139,25 @@ type openRouterCatalogRow struct {
 	Reasoning json.RawMessage `json:"reasoning"`
 }
 
+// openRouterDisplayName 给人看的名字 —— `OpenRouter · NVIDIA: Nemotron 3 Super 120B (free)`。
+//
+// ⚠️ **只补车道名，不动上游那串** —— 上游自己写的 `厂商: 型号` 与 `(free)`
+//
+//	后缀留着：agent 的模型选择列表里只有这一个字符串，车道名是分不清来源时
+//	唯一要补的那部分，其余改动属于另一件事。
+//
+// ⚠️ 上游没给名字就用 id 顶上 —— 不能发一个光秃秃的 `OpenRouter · `。
+func openRouterDisplayName(row openRouterCatalogRow) string {
+	name := strings.TrimSpace(row.Name)
+	if name == "" {
+		name = row.ID
+	}
+	if name == "" {
+		return ""
+	}
+	return "OpenRouter · " + name
+}
+
 // fallbackOpenRouterCatalogIDs 是 OpenRouter 免费模型的快照。
 //
 // ⚠️ **为什么要有快照** ——
@@ -271,7 +290,7 @@ func (o *OpenRouterLane) listModelsLive(ctx context.Context) ([]ModelInfo, *Erro
 			// ⚠️ OpenRouter 是标准 OpenAI 兼容 —— 走 chat 线。
 			//   （它也支持 /responses，但那是另一条路，v1.0 不做。）
 			Wire:               "chat",
-			Name:               row.Name,
+			Name:               openRouterDisplayName(row),
 			Free:               true,
 			Enabled:            true,
 			Created:            row.Created,

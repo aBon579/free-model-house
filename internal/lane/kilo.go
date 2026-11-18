@@ -293,11 +293,15 @@ func (k *KiloLane) listModelsLive(ctx context.Context) ([]ModelInfo, *Error) {
 	return out, nil
 }
 
-// kiloDisplayName 给人看的名字。
+// kiloDisplayName 给人看的名字 —— `Kilo · MiMo-72B`。
 //
-// ⚠️ 去掉厂商前缀和 "(free)" 后缀 ——
+// ⚠️ **带车道名前缀** —— 与 credit、自定义端点的写法一致：
 //
-//	清单里的名字带这些噪音，显示出来很乱。
+//	agent 的模型选择列表里只有这一个字符串，不带车道就分不清是谁家的。
+//
+// ⚠️ 上游自己的厂商前缀和 "(free)" 后缀仍然**去掉** ——
+//
+//	那些是清单里的噪音，车道名才是有用的那部分。
 func kiloDisplayName(row kiloRow) string {
 	name := strings.TrimSpace(row.Name)
 	if name == "" {
@@ -315,7 +319,7 @@ func kiloDisplayName(row kiloRow) string {
 	if name == "" {
 		name = row.ID
 	}
-	return name
+	return "Kilo · " + name
 }
 
 // recordError 记一次错误。

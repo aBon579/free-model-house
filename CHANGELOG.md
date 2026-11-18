@@ -49,6 +49,13 @@
 
 ### 变更
 
+- **Kilo 与 OpenRouter 的模型显示名带上车道名** —— agent 的模型选择列表里只看得见
+  `name` 这一个字符串，之前只有 Credit（`TRAE · Qwen4-Max`）和自定义端点带来源，
+  这两条车道是裸名字，而同名模型在两条车道里会撞（Kilo 与 OpenRouter 的免费 id 完全重叠）。
+  现在写成 `Kilo · mimo-v2.6-flash`、`OpenRouter · NVIDIA: Nemotron 3 Super 120B (free)`。
+  ⚠️ 只加车道名，别的都不动：Kilo 照旧剥掉上游的厂商前缀和 `(free)` 后缀，
+  OpenRouter 上游自己写的 `厂商: 型号` 原样留着；zen 与离线快照本来就不填名字，保持不填。
+  模型 **id 一直是 `kilo/…`、`openrouter/…`，没变** —— 换的只是给人看的那行字。
 - **credit 车道不进「自动跨模型调用」的普通回落链** —— 之前开着回落时，免密车道的失败会把
   credit 账号池里的模型也排进替补，等于悄悄花掉用户自己的额度、还把 prompt 送进了他没选的上游；
   现在免密车道切免密车道，两条都不行才用 OpenRouter，一个 credit 模型都不进。

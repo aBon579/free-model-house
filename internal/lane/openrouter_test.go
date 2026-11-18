@@ -278,4 +278,8 @@ func TestOpenRouterCatalogParsesRealShape(t *testing.T) {
 	if !canDisable {
 		t.Error("mandatory:false 时应该能关掉思考")
 	}
+	// 真实清单行也照样带车道名 —— agent 的选择列表里只有这一个字符串。
+	if got, want := openRouterDisplayName(row), "OpenRouter · DeepSeek R1 (free)"; got != want {
+		t.Errorf("显示名 = %q，想要 %q", got, want)
+	}
 }
