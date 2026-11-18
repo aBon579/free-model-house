@@ -59,9 +59,6 @@ func (c *CustomLane) Ready() bool {
 	return len(c.providers) > 0
 }
 
-// NeedsCredential 报告这条车道要用用户自己的凭据。
-func (c *CustomLane) NeedsCredential() bool { return true }
-
 // AutoProbeable 报告这条车道**不参与自动批量探测**。
 func (c *CustomLane) AutoProbeable() bool { return false }
 

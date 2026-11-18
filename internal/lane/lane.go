@@ -81,41 +81,6 @@ func laneAutoProbeable(l Lane) bool {
 	return true
 }
 
-// Credentialed 是"这条车道要不要花**用户自己的**额度"的可选接口。
-//
-// ⚠️ **为什么需要它** ——
-//
-// 「自动跨模型调用」的许可**不能一刀切**：
-//
-//	① 免密车道之间（zen ↔ Kilo）切换 —— **不花任何人的钱**。
-//	② 切到**用用户自己 Key 的车道**（OpenRouter）——
-//	   花**用户自己的额度**，所以**必须**用户显式开。
-//
-// ⚠️ 之前两种情况被当成一回事（都挂在同一个开关下），
-// 结果是：zen 被封了，用户得手动开开关才能用上 Kilo ——
-// 而 Kilo 明明是免费的。
-type Credentialed interface {
-	// NeedsCredential 报告这条车道是否需要用户自己的凭据。
-	NeedsCredential() bool
-}
-
-// laneNeedsCredential 报告一条车道是否需要用户自己的凭据。
-//
-// ⚠️ **不实现 `Credentialed` 的车道默认**不需要** ——
-//
-//	它多半是免密的共享池。
-//
-// ⚠️ **未就绪的车道本来就会被跳过** ——
-//
-//	没配 Key 的 OpenRouter 车道 `Ready()` 返回 false，
-//	所以"没声明但其实要 Key"这种情况不会漏出去。
-func laneNeedsCredential(l Lane) bool {
-	if c, ok := l.(Credentialed); ok {
-		return c.NeedsCredential()
-	}
-	return false
-}
-
 // LaneStatus 是一条 lane 的状态。
 type LaneStatus struct {
 	ID   string `json:"id"`

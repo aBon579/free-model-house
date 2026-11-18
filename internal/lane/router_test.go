@@ -24,14 +24,6 @@ type fakeLane struct {
 	// ⚠️ 这是"吐过内容后不能换模型"的真实场景 ——
 	// 上游在流到一半时拒绝（配额在流中途耗尽）。
 	emitThenFail map[string]*Error
-	// needsCredential 标记这条假车道**要花用户自己的额度**。
-	//
-	// ⚠️ **必须跟真实车道一致** ——
-	//   真实的 OpenRouter 车道声明 `NeedsCredential() == true`，
-	//   zen / Kilo 声明 `false`。
-	//   测试假车道不声明的话，路由器会以为它**免费**，
-	//   于是回落到它 —— 测试就测不出"该不该用用户额度"了。
-	needsCredential bool
 	// onCall 是"每次调用前"的钩子 —— 返回非 nil 就当这次失败。
 	//
 	// ⚠️ 用来测"**前 N 次失败、第 N+1 次成功**"这种时序行为
@@ -44,8 +36,6 @@ type fakeLane struct {
 func (f *fakeLane) ID() string  { return f.id }
 func (f *fakeLane) Ready() bool { return f.ready }
 
-// NeedsCredential 声明这条假车道要不要花用户自己的额度。
-func (f *fakeLane) NeedsCredential() bool { return f.needsCredential }
 func (f *fakeLane) ListModels(ctx context.Context) ([]ModelInfo, *Error) {
 	return nil, nil
 }
@@ -138,7 +128,7 @@ func newTestRouter(lanes ...Lane) (*Router, *Catalog) {
 // TestRouterPicksRequestedModelFirst 验证请求的模型**永远排第一**。
 func TestRouterPicksRequestedModelFirst(t *testing.T) {
 	zen := &fakeLane{id: "zen", ready: true, text: "ok", emitText: true}
-	or := &fakeLane{id: "openrouter", ready: true, text: "ok", emitText: true, needsCredential: true}
+	or := &fakeLane{id: "openrouter", ready: true, text: "ok", emitText: true}
 	router, catalog := newTestRouter(zen, or)
 	catalog.Replace([]ModelInfo{
 		{ID: "a-free", Lane: "zen", Enabled: true},
@@ -312,7 +302,7 @@ func TestRouterSkipsSameLaneOnGateRejection(t *testing.T) {
 //	该失败。
 func TestRouterSkipsUnreadyLane(t *testing.T) {
 	zen := &fakeLane{id: "zen", ready: false}
-	or := &fakeLane{id: "openrouter", ready: true, text: "ok", emitText: true, needsCredential: true}
+	or := &fakeLane{id: "openrouter", ready: true, text: "ok", emitText: true}
 	router, catalog := newTestRouter(zen, or)
 	// ⚠️ **关掉「自动跨模型调用」** —— 指名了模型就不该换。
 	router.SetAutoModelSwitch(false)
@@ -340,7 +330,7 @@ func TestRouterSkipsUnreadyLane(t *testing.T) {
 // 没就绪的车道可以兜底。
 func TestRouterUnreadyLaneFallsBackWhenAllowed(t *testing.T) {
 	zen := &fakeLane{id: "zen", ready: false}
-	or := &fakeLane{id: "openrouter", ready: true, text: "ok", emitText: true, needsCredential: true}
+	or := &fakeLane{id: "openrouter", ready: true, text: "ok", emitText: true}
 	router, catalog := newTestRouter(zen, or)
 	catalog.Replace([]ModelInfo{
 		{ID: "a-free", Lane: "zen", Enabled: true},

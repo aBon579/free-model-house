@@ -1137,18 +1137,6 @@ func (r *Router) Complete(ctx context.Context, turn *Turn, emit func(Chunk), com
 	return result, final
 }
 
-// candidateNeedsCredential 报告候选所在的车道是否要花**用户自己的**额度。
-func (r *Router) candidateNeedsCredential(laneID string) bool {
-	if r.lanes == nil {
-		return false
-	}
-	l, ok := r.lanes.Get(laneID)
-	if !ok {
-		return false
-	}
-	return laneNeedsCredential(l)
-}
-
 // isAccountQuota 报告这个配额错误是不是**账号级**的。
 //
 // ⚠️ **为什么要分两种** ——

@@ -24,7 +24,7 @@ func newPoolRouter(t *testing.T, autoSwitch bool) (*Router, *fakeLane, *fakeLane
 	kilo := &fakeLane{id: KiloLaneID, ready: true, text: "ok", emitText: true, behavior: map[string]*Error{}}
 	or := &fakeLane{
 		id: OpenRouterLaneID, ready: true, text: "ok", emitText: true,
-		needsCredential: true, behavior: map[string]*Error{},
+		behavior: map[string]*Error{},
 	}
 
 	router, catalog := newTestRouter(zen, kilo, or)
@@ -207,7 +207,7 @@ func TestAutoSwitchOnCanSwitchWithinSameLane(t *testing.T) {
 	kilo := &fakeLane{id: KiloLaneID, ready: true, text: "ok", emitText: true, behavior: map[string]*Error{}}
 	or := &fakeLane{
 		id: OpenRouterLaneID, ready: true, text: "ok", emitText: true,
-		needsCredential: true, behavior: map[string]*Error{},
+		behavior: map[string]*Error{},
 	}
 	router, catalog := newTestRouter(zen, kilo, or)
 	catalog.Replace([]ModelInfo{
@@ -239,7 +239,7 @@ func TestAutoSwitchStopsAtMaxFailover(t *testing.T) {
 	kilo := &fakeLane{id: KiloLaneID, ready: true, text: "ok", emitText: true, behavior: map[string]*Error{}}
 	or := &fakeLane{
 		id: OpenRouterLaneID, ready: true, text: "ok", emitText: true,
-		needsCredential: true, behavior: map[string]*Error{},
+		behavior: map[string]*Error{},
 	}
 
 	router, catalog := newTestRouter(zen, kilo, or)

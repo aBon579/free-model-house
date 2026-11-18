@@ -832,13 +832,13 @@ func TestNotReadyWithoutAccounts(t *testing.T) {
 	if status.Reason == "" {
 		t.Error("界面上要能解释为什么不 Ready")
 	}
-	// ⚠️ 这两条断言是"手动测试才会花额度"的**唯一**结构性保证。
+	// ⚠️ 这几条断言是"手动测试才会花额度"的**唯一**结构性保证。
 	//   靠"记得别探测它"迟早会漏。
 	if l.AutoProbeable() {
 		t.Error("credit 池绝不能参与周期探测 —— 那是每 10 分钟烧一次用户自己的额度")
 	}
-	if !l.NeedsCredential() {
-		t.Error("NeedsCredential 必须为 true")
+	if !status.NeedsCredential {
+		t.Error("界面上必须标出 credit 的模型花用户自己的额度")
 	}
 	if l.ID() != LaneID {
 		t.Errorf("id = %q", l.ID())

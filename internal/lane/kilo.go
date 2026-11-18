@@ -84,13 +84,6 @@ func (k *KiloLane) ID() string { return KiloLaneID }
 //	唯一的失败模式是网络不通，而那会在请求时报错。
 func (k *KiloLane) Ready() bool { return true }
 
-// NeedsCredential 报告这条车道**不需要**用户自己的凭据。
-//
-// ⚠️ 显式声明 `false`（而不是"不实现接口"）——
-//
-//	意图清楚，也防止以后有人误加。
-func (k *KiloLane) NeedsCredential() bool { return false }
-
 // Status 返回这条车道的状态。
 func (k *KiloLane) Status() LaneStatus {
 	k.mu.Lock()

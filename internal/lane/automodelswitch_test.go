@@ -27,7 +27,7 @@ import (
 func newAutoSwitchRouter(t *testing.T, zenErr, orErr *Error, autoSwitch bool) (*Router, *fakeLane, *fakeLane) {
 	t.Helper()
 	zen := &fakeLane{id: ZenLaneID, ready: true, text: "ok", emitText: true, behavior: map[string]*Error{}}
-	or := &fakeLane{id: OpenRouterLaneID, ready: true, text: "ok", emitText: true, needsCredential: true, behavior: map[string]*Error{}}
+	or := &fakeLane{id: OpenRouterLaneID, ready: true, text: "ok", emitText: true, behavior: map[string]*Error{}}
 	if zenErr != nil {
 		zen.behavior["zen/model-a"] = zenErr
 		zen.behavior["zen/model-b"] = zenErr

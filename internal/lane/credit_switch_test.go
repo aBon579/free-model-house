@@ -21,7 +21,7 @@ func creditFulls(cands []candidate) []string {
 //	所以这里刻意让 `a` 在两个渠道都存在 —— 同名替补是首选路径。
 func creditTestRouter() (*Router, *Catalog) {
 	zen := &fakeLane{id: ZenLaneID, ready: true}
-	cr := &fakeLane{id: CreditLaneID, ready: true, needsCredential: true}
+	cr := &fakeLane{id: CreditLaneID, ready: true}
 	router, catalog := newTestRouter(zen, cr)
 	catalog.Replace([]ModelInfo{
 		{ID: "zen/z", Lane: ZenLaneID, Enabled: true},

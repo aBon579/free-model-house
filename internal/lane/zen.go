@@ -65,11 +65,6 @@ func (z *ZenLane) SetBaseURL(base string) {
 // ⚠️ 免密车道**永远 ready** —— 它不需要任何凭据。
 func (z *ZenLane) Ready() bool { return true }
 
-// NeedsCredential 报告这条车道**不需要**用户自己的凭据。
-//
-// ⚠️ 显式声明 `false` —— zen 是免密共享池。
-func (z *ZenLane) NeedsCredential() bool { return false }
-
 // Status 实现 Lane。
 func (z *ZenLane) Status() LaneStatus {
 	z.mu.Lock()

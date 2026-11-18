@@ -61,14 +61,6 @@ func New(backend Backend) *Lane {
 // ID 是车道标识。
 func (l *Lane) ID() string { return LaneID }
 
-// NeedsCredential 报告这些模型花的是**用户自己的**额度。
-//
-// ⚠️ 它决定了两件事：
-//
-//	① 「自动跨模型调用」默认不许切进来 —— 得用户显式开；
-//	② 界面上"未探测"不代表坏了，只代表没花用户的钱去探。
-func (l *Lane) NeedsCredential() bool { return true }
-
 // AutoProbeable 报告这条车道**不参与**自动批量探测。
 //
 // ⚠️ 一轮探测 = 每个模型一次真实推理，而 credit 池里躺着几十上百个模型 ——

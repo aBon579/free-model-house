@@ -139,13 +139,6 @@ type openRouterCatalogRow struct {
 	Reasoning json.RawMessage `json:"reasoning"`
 }
 
-// NeedsCredential 报告这条车道**需要用户自己的 Key**。
-//
-// ⚠️ 切到这条车道 = 花**用户自己的额度**，
-//
-//	所以它必须显式声明，路由器才知道要用户许可。
-func (o *OpenRouterLane) NeedsCredential() bool { return true }
-
 // fallbackOpenRouterCatalogIDs 是 OpenRouter 免费模型的快照。
 //
 // ⚠️ **为什么要有快照** ——
