@@ -1125,8 +1125,11 @@ func (a *Admin) handleSettings(w http.ResponseWriter, r *http.Request) {
 			// ⚠️ **默认关闭** = 每轮全量探测（数量稳定、结论一致）。
 			"adaptiveProbe": a.db.GetBool(store.SettingAdaptiveProbe, false),
 			// ⚠️ **计划性调用列表** —— 最多 3 个，按优先级。
-			//   只在「自动跨模型调用」开启时生效。
+			//   生效要「自动跨模型调用」**和**下面这个开关**都开着**。
 			"planModels": a.planModels(),
+			// ⚠️ **默认关闭** —— 槽位能越过车道优先级（包括点到花用户额度的车道），
+			//   这种权力必须由用户显式授予；升级后原有槽位内容保留，但不生效。
+			"planModelsEnabled": a.db.GetBool(store.SettingPlanModelsEnabled, false),
 			// ⚠️ **没有 conformanceIntervalMin** —— 合规检查功能已砍掉。
 		})
 		return
@@ -1150,6 +1153,9 @@ func (a *Admin) handleSettings(w http.ResponseWriter, r *http.Request) {
 		AdaptiveProbe *bool `json:"adaptiveProbe"`
 		// 计划性调用列表（最多 3 个模型 id，按优先级）。
 		PlanModels *[]string `json:"planModels"`
+		// 计划性调用列表**自己的**开关。与 `AutoModelSwitch` 各存各的 ——
+		// ⚠️ 关掉自动跨模型调用**不许**顺手把这个写成 false（那等于抹掉用户的设置）。
+		PlanModelsEnabled *bool `json:"planModelsEnabled"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求体不是 JSON"})
@@ -1218,6 +1224,9 @@ func (a *Admin) handleSettings(w http.ResponseWriter, r *http.Request) {
 		if err := a.db.PutJSON(store.SettingPlanModels, plan); err != nil {
 			a.logf("存计划性调用列表失败: %v", err)
 		}
+	}
+	if body.PlanModelsEnabled != nil {
+		a.db.SetSetting(store.SettingPlanModelsEnabled, boolToStr(*body.PlanModelsEnabled))
 	}
 	// ⚠️ **没有 conformanceIntervalMin** —— 合规检查已砍掉。
 	if a.onConfigChanged != nil {

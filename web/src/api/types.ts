@@ -340,10 +340,19 @@ export interface Settings {
   /**
    * **计划性调用列表** —— 最多 3 个模型 id，按优先级回落。
    *
-   * ⚠️ 只在 `autoModelSwitch` 开启时生效；
+   * ⚠️ 生效条件有两个：`autoModelSwitch` **且** `planModelsEnabled`。
+   *   两个都开着才按这里的槽位顺序回落；
    *   三个都不可用才回到模型池的原有回落规则。
    */
   planModels?: string[]
+  /**
+   * **计划性调用列表的开关** —— 默认关闭。
+   *
+   * ⚠️ 关闭时回落只走车道优先级（免密车道优先，OpenRouter 垫底）；
+   *   开启时这里选中的模型**优先于车道优先级**，
+   *   并且**不受车道规则限制**（计划槽位是显式授权）。
+   */
+  planModelsEnabled?: boolean
   // ⚠️ **没有 probeBatchSize** —— 探测是**全量**的，
   //   每 10 分钟把每个免费模型都探一遍。
   /** 探测批量自适应 —— 上游越拥挤，探得越少。 */

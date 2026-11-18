@@ -881,9 +881,19 @@ const (
 	SettingProxyConfig = "proxy_config"
 	// SettingPlanModels 是**计划性调用列表**（最多 3 个模型 id，按优先级）。
 	//
-	// ⚠️ 只在「自动跨模型调用」开启时生效 ——
-	//   请求模型失败后，按这个顺序依次回落；三个都不可用才回落到模型池。
+	// ⚠️ 生效要**两个开关都开** —— 见 `SettingPlanModelsEnabled`：
+	//   「自动跨模型调用」关时候选链压根没有"别的模型"，槽位无从谈起；
+	//   这个列表自己的开关关时，回落走车道优先级（Kilo ↔ Zen → OpenRouter）。
+	// ⚠️ 槽位内容**不受开关影响** —— 关掉任何一个开关都不清空这里。
 	SettingPlanModels = "plan_models"
+	// SettingPlanModelsEnabled 是**计划性调用列表自己的**开关。
+	//
+	// ⚠️ **默认关闭**：升级后原有的槽位内容保留，但不再自动生效 ——
+	//   计划槽位能越过车道优先级（包括点到要花用户额度的车道），
+	//   这种"绕过保守规则"的权力必须由用户显式授予。
+	// ⚠️ 与 `SettingAutoModelSwitch` **各存各的**：关掉自动跨模型调用
+	//   不许把这个值改写成 0，否则重新开启时用户的设置已经没了。
+	SettingPlanModelsEnabled = "plan_models_enabled"
 	// SettingCustomProviders 是**Key Hub 自定义 OpenAI 兼容端点**的元数据（JSON）。
 	//
 	// ⚠️ **Key 本身不在这里** —— key 存进加密的 secrets 表

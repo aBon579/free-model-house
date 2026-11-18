@@ -584,15 +584,23 @@ func applySettings(db *store.DB, router *lane.Router, logger *log.Logger) {
 	//   免得升级之后开关自己变回关闭。
 	switchOn := db.GetAutoModelSwitch(false)
 	router.SetAutoModelSwitch(switchOn)
-	// ⚠️ **计划性调用列表** —— 三个模型槽位按优先级回落。
+	// ⚠️ **计划性调用列表** —— 三个模型槽位按优先级回落，
+	//   但要**两个开关都开**才生效，而且它自己的开关**默认关闭**：
+	//   槽位能把模型提到车道优先级之前（包括点到花用户自己额度的车道），
+	//   所以升级后原有的槽位只是"存着"，不在启动日志里点明的话没人知道它没生效。
+	planOn := db.GetBool(store.SettingPlanModelsEnabled, false)
+	router.SetPlanModelsEnabled(planOn)
 	var plan []string
 	if _, err := db.GetJSON(store.SettingPlanModels, &plan); err == nil {
 		router.SetPlanModels(plan)
 	}
 	if switchOn {
-		logger.Printf("自动跨模型调用：已开启（模型失败时自动换：Kilo ↔ Zen → OpenRouter）")
-		if len(plan) > 0 {
-			logger.Printf("计划性调用列表：%d 个槽位，按优先级回落", len(plan))
+		logger.Printf("自动跨模型调用：已开启（模型失败时自动换：Kilo ↔ Zen → OpenRouter；credit 不进这条链，只在其他渠道之间回落）")
+		switch {
+		case planOn && len(plan) > 0:
+			logger.Printf("计划性调用列表：已开启，%d 个槽位按优先级回落（优先级高于车道顺序）", len(plan))
+		case len(plan) > 0:
+			logger.Printf("计划性调用列表：已关闭 —— 存着 %d 个槽位但不生效，回落按车道顺序", len(plan))
 		}
 	} else {
 		logger.Printf("自动跨模型调用：已关闭（只重试当前模型，不换模型）")

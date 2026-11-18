@@ -64,10 +64,17 @@ type Router struct {
 	switches *LaneSwitches
 	// planModels 是**计划性调用列表**（最多 3 个槽位，按优先级排列）。
 	//
-	// ⚠️ 只在**自动跨模型回落**开启时生效：
-	//   请求的模型失败后，按这里的槽位顺序依次回落；
-	//   三个槽位都不可用时，才回到原先的"模型池"回落规则。
+	// ⚠️ 生效要**两个开关都开**（`allowModelSwitch` && `planModelsEnabled`）：
+	//   关着自动跨模型 → 候选链压根没有"别的模型"，槽位无从谈起；
+	//   关着这个列表自己的开关 → 按车道优先级回落（Kilo ↔ Zen → OpenRouter）。
 	planModels []string
+	// planModelsEnabled 是**计划性调用列表自己的**开关（默认关）。
+	//
+	// ⚠️ 默认关闭是刻意的 —— 槽位能把模型提到车道优先级之前，
+	//   包括点到"要花用户自己额度"的那条车道。这种越过保守规则的权力
+	//   必须用户显式授予，不能因为"他以前填过槽位"就自动生效。
+	// ⚠️ 它与 `allowModelSwitch` **各存各的**：关掉后者不许改写这个值。
+	planModelsEnabled bool
 	// mu 保护可变设置。
 	mu sync.RWMutex
 }
@@ -128,6 +135,42 @@ func (r *Router) planModelList() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return append([]string(nil), r.planModels...)
+}
+
+// SetPlanModelsEnabled 开/关**计划性调用列表**（两个开关里的第二个）。
+func (r *Router) SetPlanModelsEnabled(on bool) {
+	r.mu.Lock()
+	r.planModelsEnabled = on
+	r.mu.Unlock()
+}
+
+// planEnabled 报告计划槽位当前到底生不生效。
+//
+// ⚠️ 三个条件缺一不可：自动跨模型调用开启（关着时候选链只有一个模型，
+//
+//	没有"回落"这回事）、计划列表自己的开关开启、槽位里有内容。
+func (r *Router) planEnabled() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.allowModelSwitch && r.planModelsEnabled && len(r.planModels) > 0
+}
+
+// protectedPlanModels 返回**当前生效**的计划槽位 full id 集合。
+//
+// ⚠️ 计划列表关着时返回 nil —— 关掉的列表既不把模型提前，
+//
+//	**也不享有车道规则的豁免**（否则"关掉计划列表"会变成一句谎话：
+//	槽位内容仍然能把 credit 模型塞进免密车道的回落链里）。
+func (r *Router) protectedPlanModels() map[string]bool {
+	if !r.planEnabled() {
+		return nil
+	}
+	list := r.planModelList()
+	set := make(map[string]bool, len(list))
+	for _, full := range list {
+		set[full] = true
+	}
+	return set
 }
 
 // ThrottleRows 导出限流账本（供持久化）。
@@ -276,11 +319,25 @@ func (r *Router) BuildCandidates(requestedLane, requestedModel string, needs Nee
 	//
 	// ⚠️ 但**请求的那个模型永远排第一** ——
 	//   换模型是"它不行之后"的事，不是"一开始就换"。
+	//
+	// ⚠️⚠️ **credit 车道不进这条普通回落链** —— 上面那句承诺是
+	//   "免密车道互备 → 实在不行才用 OpenRouter"，里面没有"悄悄换到
+	//   用户自己账号的额度"。反向同理：**credit 模型的失败只在其他渠道
+	//   （Qoder / Qoder 中国版 / TRAE）之间找替补，且优先同名模型**，
+	//   全都不行就直接报错 —— 绝不借用免密车道（prompt 会被那些上游记录）。
+	//   唯一的例外是**计划性调用列表的槽位**：那是用户逐个点名的显式授权。
 	if r.allowModelSwitch {
+		out = applySwitchLaneRules(out, laneID, upstream, r.protectedPlanModels())
+		if laneID == CreditLaneID {
+			// 别的渠道的同名模型排在其他模型之前。
+			out = orderCreditPool(out, upstream)
+		}
 		out = orderLanesForSwitch(out, laneID)
-		// ⚠️ **计划性调用列表优先** —— 三个槽位按优先级排在池子前面；
-		//   三个都不可用时保持原有顺序（即"回落到原规则"）。
-		out = r.orderPlanModels(out)
+		// ⚠️ **计划性调用列表优先** —— 要它**自己的开关**也开着才算数；
+		//   三个槽位按优先级排在池子前面，都不可用时保持原有顺序（即"回落到原规则"）。
+		if r.planEnabled() {
+			out = r.orderPlanModels(out)
+		}
 	}
 
 	// 请求的模型提到最前。
@@ -336,6 +393,11 @@ func (r *Router) BuildCandidates(requestedLane, requestedModel string, needs Nee
 //	1 —— 另一条**免密**车道（Kilo ↔ Zen）：**不花任何人的钱**
 //	2 —— **OpenRouter**：用**用户自己的**额度，最后才考虑
 //
+// ⚠️ **credit 车道到不了这里** —— 它在 `applySwitchLaneRules` 就被裁掉了
+//
+//	（不是"排到最后"，是压根不进链）。走到这儿的 credit 候选只可能来自
+//	计划槽位那条豁免路径。
+//
 // ⚠️ 组内的相对顺序**保持 sortCandidates 的结果** ——
 //
 //	那是按可用性/延迟排的，比"哪个车道优先"更重要。
@@ -366,6 +428,103 @@ func orderLanesForSwitch(cands []candidate, originLane string) []candidate {
 			lanePriorityForSwitch(cands[j].Lane, originLane)
 	})
 	return cands
+}
+
+// applySwitchLaneRules 按车道规则把不该进回落链的候选**剔掉**。
+//
+// ⚠️ 是"剔除"而不是"排后面" —— 排在后面意味着**真的会被打到**：
+//
+//	免密车道整体限流的一轮请求会顺着链子烧到用户自己账号的额度上，
+//	而用户开这个开关时读到的承诺是"Kilo ↔ Zen（免密）→ OpenRouter"。
+func applySwitchLaneRules(cands []candidate, originLane, upstream string, protected map[string]bool) []candidate {
+	if originLane != CreditLaneID {
+		// 快路径：请求不是 credit，而链里也没有 credit 模型 —— 绝大多数流量。
+		hasCredit := false
+		for _, c := range cands {
+			if c.Lane == CreditLaneID {
+				hasCredit = true
+				break
+			}
+		}
+		if !hasCredit {
+			return cands
+		}
+	}
+	out := make([]candidate, 0, len(cands))
+	for _, c := range cands {
+		if keepForSwitch(c, originLane, upstream, protected) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// keepForSwitch 报告「自动跨模型调用」开启时一个候选能不能进回落链。
+func keepForSwitch(c candidate, originLane, upstream string, protected map[string]bool) bool {
+	// ① 计划槽位是用户逐个点名的 —— 压过车道规则。
+	if protected[c.Full] {
+		return true
+	}
+	if originLane != CreditLaneID {
+		// ② 普通回落不参与 credit 车道。
+		return c.Lane != CreditLaneID
+	}
+	// ③ credit 请求只在 credit 池里找，不外溢到免密车道。
+	if c.Lane != CreditLaneID {
+		return false
+	}
+	// 请求的那个模型本身必须留下（后面 `pickRequested` 把它提到第一位）。
+	if c.Model == upstream {
+		return true
+	}
+	// ⚠️ **同渠道的其他模型不留** —— credit 的额度与风控是**账号级**的，
+	//   这个模型被拒，换同渠道另一个模型大概率拿到同一个拒绝，
+	//   等于白烧一次上游请求。
+	//   （同渠道**换账号**不受这里管 —— 那是 `creditlane.Do` 里更细的一层。）
+	origin := creditProvider(upstream)
+	provider := creditProvider(c.Model)
+	return provider != "" && provider != origin
+}
+
+// creditProvider 取 credit 裸模型 id（形如 `qoder/xxx`）里的渠道段；没有斜杠返回空。
+func creditProvider(model string) string {
+	if i := strings.IndexByte(model, '/'); i > 0 {
+		return model[:i]
+	}
+	return ""
+}
+
+// creditUpstreamName 取 credit 裸模型 id 里的**上游模型名**段。
+func creditUpstreamName(model string) string {
+	if i := strings.IndexByte(model, '/'); i > 0 && i+1 < len(model) {
+		return model[i+1:]
+	}
+	return model
+}
+
+// orderCreditPool 把**别的渠道的同名模型**提到其他模型之前。
+//
+// ⚠️ 同名优先的理由是**行为一致**：换个渠道跑同一个模型，客户端拿到的还是
+//
+//	它点名的那个能力；直接换成别的模型才是"悄悄改了答案的来源"。
+//	没有同名可用时才轮到别的。稳定分组 —— 两组内部保持 `sortCandidates` 的结果。
+func orderCreditPool(cands []candidate, upstream string) []candidate {
+	name := creditUpstreamName(upstream)
+	if name == "" || len(cands) < 2 {
+		return cands
+	}
+	out := make([]candidate, 0, len(cands))
+	for _, c := range cands {
+		if creditUpstreamName(c.Model) == name {
+			out = append(out, c)
+		}
+	}
+	for _, c := range cands {
+		if creditUpstreamName(c.Model) != name {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // orderPlanModels 把**计划性调用列表**里的可用模型按槽位顺序提到前面。
@@ -889,7 +1048,7 @@ func (r *Router) Complete(ctx context.Context, turn *Turn, emit func(Chunk), com
 			// ⚠️ 但**模型级**配额（"这个模型没额度了"）
 			//   **不能**跳车道 —— 那会让同车道的其他模型白白受牵连。
 			if isAccountQuota(uerr.Message) {
-				skipLane(cands, i, cand.Lane)
+				skipRestOfLane(cands, i, cand)
 			}
 		case CodeServer, CodeTimeout, CodeTransport, CodeReset, CodeEmpty, CodeUnknown:
 			slowBudgetUsed = elapsed
@@ -899,7 +1058,7 @@ func (r *Router) Complete(ctx context.Context, turn *Turn, emit func(Chunk), com
 			// ⚠️ 但**同一车道内**换模型没用：
 			// 闸门/风控对所有模型一视同仁，
 			// 所以要把同车道的其余候选也跳过。
-			skipLane(cands, i, cand.Lane)
+			skipRestOfLane(cands, i, cand)
 		}
 
 		// ⚠️ 许可检查在**尝试之前**做了
@@ -969,6 +1128,12 @@ func (r *Router) Complete(ctx context.Context, turn *Turn, emit func(Chunk), com
 	if !r.allowModelSwitch {
 		final.Message += "（未开启「自动跨模型调用」，不会切换到其他模型）"
 	}
+	// ⚠️ **credit 走完全链也要说明"为什么没有下文"** ——
+	//   它失败的下一站本来可以是免密车道，是**车道规则**拦住的，
+	//   不是网关找不到模型。不说清就会变成"我明明开着回落却直接报错"。
+	if r.allowModelSwitch && originLane == CreditLaneID {
+		final.Message += "（credit 模型只回落到其他渠道的同名模型，再退到其他渠道的其他模型；不会借用免密车道）"
+	}
 	return result, final
 }
 
@@ -1027,6 +1192,26 @@ func isAccountQuota(msg string) bool {
 func skipLane(cands []candidate, from int, laneID string) {
 	for j := from + 1; j < len(cands); j++ {
 		if cands[j].Lane == laneID {
+			cands[j].tried = true
+		}
+	}
+}
+
+// skipRestOfLane 在"这一整片都不行"的错误之后，把剩下没救的候选标为已试。
+//
+// ⚠️ **credit 必须按渠道跳，不能按车道跳** —— Credit 是**一条**车道装着
+//
+//	Qoder / Qoder 中国版 / TRAE **三个渠道**，而它的额度与风控是渠道内
+//	账号级的：Qoder 被拒完全不代表 TRAE 也被拒。
+//	照抄 `skipLane` 会把本次唯一还有希望的替补一起跳过。
+func skipRestOfLane(cands []candidate, from int, c *candidate) {
+	if c.Lane != CreditLaneID {
+		skipLane(cands, from, c.Lane)
+		return
+	}
+	provider := creditProvider(c.Model)
+	for j := from + 1; j < len(cands); j++ {
+		if cands[j].Lane == CreditLaneID && creditProvider(cands[j].Model) == provider {
 			cands[j].tried = true
 		}
 	}

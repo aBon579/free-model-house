@@ -19,6 +19,15 @@ import (
 // 但它们对上层是**一样的**：给一个 Turn，产出一串统一事件。
 // 详见 docs/design/00-overview.md §5.2。
 
+// CreditLaneID 是 Credit 账号池的车道标识。
+//
+// ⚠️ **常量定义在这里而不是 `internal/creditlane`** —— 路由器要按车道 id
+//
+//	做回落裁剪（credit 不进普通回落），而 `internal/creditlane` 本身
+//	依赖本包；把 id 放在被依赖的一侧才不会形成循环。
+//	`creditlane.LaneID` 是它的别名，两处不可能各写一个字符串。
+const CreditLaneID = "credit"
+
 // Lane 是一个上游源。
 type Lane interface {
 	// ID 是源的标识（"zen" / "openrouter"）。

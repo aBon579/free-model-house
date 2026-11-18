@@ -26,7 +26,11 @@ import (
 )
 
 // LaneID 是这条车道的标识。
-const LaneID = "credit"
+//
+// ⚠️ 真身是 `lane.CreditLaneID` —— 路由器要按它裁剪回落链，
+//
+//	所以两处必须同一个常量，不能各写一遍 "credit"。
+const LaneID = lane.CreditLaneID
 
 // Backend 是这条车道真正用到的那部分 credit.Manager。
 //

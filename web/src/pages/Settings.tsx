@@ -200,15 +200,30 @@ export function Settings() {
 
         {/* 计划性调用列表 */}
         <Card>
+          {/* ⚠️ **开关只在「自动跨模型调用」开着时可点** ——
+              回落本身关闭时，槽位选什么都不参与切换，
+              开关置灰就够了，不用把整张卡变灰 ——
+              槽位仍然可以提前选好，之后打开回落直接生效。 */}
           <CardHeader
             title="计划性调用列表"
-            description="请求模型失败时，按这三个槽位的优先级依次回落；三个都不可用时，才回到模型池的原有回落规则。"
+            description="开关开启后，请求模型失败时按这三个槽位的优先级依次回落；三个都不可用时，才回到模型池的原有回落规则。"
+            actions={
+              <Switch
+                checked={draft.planModelsEnabled ?? false}
+                disabled={!draft.autoModelSwitch}
+                onChange={(v) => {
+                  setDraft({ ...draft, planModelsEnabled: v })
+                  save.mutate({ planModelsEnabled: v })
+                }}
+                label="计划性调用列表"
+              />
+            }
           />
           <CardBody>
             {!draft.autoModelSwitch ? (
               <Notice tone="warn">
                 <div className="text-[12px]">
-                  当前「自动跨模型调用」是关闭的 —— 计划性调用列表只在开启回落时生效。
+                  当前「自动跨模型调用」是关闭的 —— 计划性调用列表要等它开启后才参与切换顺序。
                 </div>
               </Notice>
             ) : null}
