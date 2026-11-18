@@ -268,7 +268,7 @@ function MachineDialog({ machine, onClose, onDone }: { machine?: MachineStatus; 
     <Modal title="导入 Qoder 设备身份" onClose={onClose} busy={op.busy}>
       <Notice>每日领取要的一对请求头（Cosy-MachineToken / Cosy-MachineType）。它由 Qoder 客户端在<b>你这台电脑</b>上算出来，和登录哪个账号无关；网关跑在 NAS 上没有客户端，只能由电脑送一份过来，全局存一份共用。</Notice>
       <Notice tone="warn">原值只进不出：这个接口发给你自己的网关这一次，页面不显示也不保存它（账户快照每 30 秒轮询一次，带上原值等于把凭据挂在列表里）。不要伪造这两个值。</Notice>
-      <Notice>怎么拿：在这台装有 Qoder 客户端的电脑上双击 <span className="mono">tools\qoder-machine-identity.cmd</span>（这个文件跟着源码仓库走，NAS 部署包里没有）—— 这一个文件就是全部：PowerShell 正文就在它自己的下半段里（做成 <span className="mono">.cmd</span> 而不是 <span className="mono">.ps1</span>，是因为双击 <span className="mono">.ps1</span> 只会用记事本打开，默认脚本策略还拦下载来的 <span className="mono">.ps1</span>）。它默认在<b>桌面</b>覆盖生成 <span className="mono">qoder-machine-identity.json</span>（实际落在哪个目录以脚本输出的那行为准）—— 用下面的「从 JSON 文件读取」选它就行，原值不经网络（所以要在这台电脑自己的浏览器里打开 FMH）。身份会随客户端升级换新，只导刚跑出来的那一份。</Notice>
+      <Notice>怎么拿：在这台装有 Qoder 客户端的电脑上双击 <span className="mono">qoder-machine-identity.cmd</span> 运行脚本获取 —— 它会在<b>桌面</b>生成 <span className="mono">qoder-machine-identity.json</span>（拿不到桌面时退到「文档」，再退到临时目录；实际落在哪以脚本最后那行「身份文件已生成：…」为准），用下面的「从 JSON 文件读取」选它即可。</Notice>
       <SecretIntake
         busy={op.busy}
         value={text}
