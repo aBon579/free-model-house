@@ -44,40 +44,18 @@ ssh user@nas-ip "cd ~/fmh && docker compose logs -f fmh"
 
 ### 要传哪个？
 
-三条路，传的东西不一样，先选一条：
+两条路，传的东西不一样，先选一条：
 
 | 拿法 | 传什么到 NAS | 构建走哪份 | 适用 |
 |---|---|---|---|
 | **A：`git clone` 整个仓库**（推荐） | 仓库本身 | 在线 `Dockerfile`（node → golang → scratch 三阶段） | 想改代码、想跟版本走 |
-| **B：部署包**（约 19 MB） | 那一个文件夹 | `Dockerfile.offline`（`FROM scratch`，只拷 `dist/` 里的预编译产物，**一张基础镜像都不拉**） | NAS 拉不动镜像、只想把东西跑起来 |
-| **C：现成镜像** | 只传 compose | 不构建，`docker compose up -d` 拉 GHCR | 网络通、最省事 |
+| **B：现成镜像** | 只传 compose | 不构建，`docker compose up -d` 拉 GHCR | 网络通、最省事 |
 
-三条路的运行结果一模一样，区别只在于**编译发生在谁的机器上**。
+两条路的运行结果一模一样，区别只在于**编译发生在谁的机器上**。
 
-⚠️ **不需要在 NAS 上装 Go 或 Node** —— A 和 B 的编译都在容器里完成（A 在 node/golang 阶段，B 根本不编译）。
-
-部署包长这样（**没有源码**，这是有意的）：
-
-```
-部署包/
-├── dist/               ← 镜像的全部内容，正好 5 样：out/fmh、ca-certificates.crt、zoneinfo/、passwd、group
-├── Dockerfile.offline
-├── Dockerfile.offline.dockerignore
-├── docker-compose.yml  ← 指向 Dockerfile.offline（仓库那份指向在线 Dockerfile，两份不一样）
-├── .env.example
-├── README.md · LICENSE
-└── docs/operations/    ← nas-deploy.md · lan-access.md
-```
-
-界面不单独出现在包里 —— 它编译时就进了 `out/fmh`（`go:embed`），
-所以 `dist/` 里没有 `web/`，`Dockerfile.offline` 的 5 条 COPY 也没有它。
+⚠️ **不需要在 NAS 上装 Go 或 Node** —— A 的编译在容器里完成（node 与 golang 两个阶段），B 根本不编译。
 
 要改代码重编就选 A：`cmd/ internal/ web/ vendor/ go.mod` 都在仓库里。
-部署包里放这些只会让包变大、核对变难，所以同步脚本按清单把它们挡在外面。
-
-⚠️ **别把仓库那份 `.dockerignore` 塞进部署包** —— 它按在线构建写死了 `/dist` 排除，
-   而旧版（非 BuildKit）builder 只认 `.dockerignore`、不认 `Dockerfile.offline.dockerignore`；
-   两个文件同时在场，那条 `/dist` 会让离线 COPY 找不到东西，构建直接失败。
 
 ### 怎么传
 
@@ -90,11 +68,7 @@ cd free-model-house
 
 `node_modules` 由镜像里的 `npm ci` 安装，`data/` 是本机运行时数据 —— 都不需要手动传。
 
-**B：部署包** —— `dist/` 已经编译好、整个文件夹传过去就行（约 19 MB，不含源码）。
-里面不需要 Go、不需要 Node，也不需要 NAS 能拉基础镜像；
-要自己产 `dist/` 就得在本机装 Go 与 Node（仓库里的 `scripts/build-linux.sh` 只出裸二进制，见 §1.5 末尾）。
-
-**C：现成镜像** —— 不想在 NAS 上构建的话，直接 `docker compose up -d` 拉 GHCR 上的镜像。
+**B：现成镜像** —— 不想在 NAS 上构建的话，直接 `docker compose up -d` 拉 GHCR 上的镜像。
 
 ---
 
@@ -119,7 +93,7 @@ docker compose up -d
 
 ### ⚠️ 完全不用 Docker 的话（不依赖任何镜像源）
 
-这条路要自己编译，所以得走 A（`scripts/build-linux.sh` 只在仓库里，部署包不含 `scripts/`）：
+这条路要自己编译，用仓库里的 `scripts/build-linux.sh`：
 
 ```bash
 ./scripts/build-linux.sh amd64    # → 11.6 MB 纯静态二进制
@@ -344,7 +318,6 @@ docker.io/library/node:22-alpine: ... 401 Unauthorized
 sudo systemctl restart docker
 
 # ② 或者：完全不用 Docker —— 在别处交叉编译好二进制传过去
-#    （`scripts/` 只在源码仓库里，部署包不含它）
 ./scripts/build-linux.sh amd64    # 生成 fmh-linux-amd64（11.6 MB，纯静态）
 scp fmh-linux-amd64 user@<NAS-IP>:~/
 ```
