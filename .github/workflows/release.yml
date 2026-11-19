@@ -63,3 +63,6 @@ jobs:
           else
             gh release create "$GITHUB_REF_NAME" --title "$TITLE" --notes-file .github/release-notes.md
           fi
+          # 附件 —— Credit 车道的设备身份脚本只在装了 Qoder 客户端的电脑上跑得出值，
+          #   而不装 git 的人恰恰是拉镜像那批。放一份在 Release 里，他们不用克隆仓库。
+          gh release upload "$GITHUB_REF_NAME" tools/qoder-machine-identity.cmd --clobber

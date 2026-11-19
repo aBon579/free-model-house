@@ -34,7 +34,7 @@ ghcr.io/abon579/free-model-house:latest
 
 所以这一版把它做成显式的一步：
 
-1. 在装有 Qoder 客户端的电脑上双击 `tools/qoder-machine-identity.cmd`（就一个文件，PowerShell 正文在它自己的下半段里）。它默认在桌面生成 `qoder-machine-identity.json`，实际落在哪个目录以脚本打印的那一行为准。
+1. 在装有 Qoder 客户端的电脑上双击**本页 Assets 里的 `qoder-machine-identity.cmd`**（和仓库 `tools/` 下那份是同一个文件；就一个文件，PowerShell 正文在它自己的下半段里，不用装任何东西）。它默认在桌面生成 `qoder-machine-identity.json`，实际落在哪个目录以脚本打印的那一行为准。
 2. 在这台电脑的浏览器里打开 FMH → Credit 页 →「Qoder 设备身份」→「导入」，选这个文件保存。原值只在提交那一次经过网络，之后界面只回显指纹。
 
 网关存的是**全局一份**：它是设备级的，与登录哪个账号无关。账号凭据里本来就成对带着这两个值的，那个账号用自己的。身份会随客户端升级或重新生成而换新，领不到时先在电脑上重跑一次脚本再导入，不必怀疑账号。
