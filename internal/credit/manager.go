@@ -234,7 +234,7 @@ func autoClaimDue(value, last, today string, minuteNow int) bool {
 }
 
 // parseAutoClaimAt 把 "HH:MM" 换成当天分钟数；空串走 off=true。
-// 用 time.Parse 而不是自己切字符串：它顺带把 "9:5"、"24:00" 这类写法挡掉。
+// 用 time.Parse 而不是自己切字符串：它同时把 "9:5"、"24:00" 这类写法挡掉。
 func parseAutoClaimAt(value string) (minute int, off bool, err error) {
 	if value == "" {
 		return 0, true, nil
@@ -809,9 +809,9 @@ func (m *Manager) Credits(ctx context.Context, id string) (Credits, error) {
 	return credits, err
 }
 
-// 领取失败的分档。秒数来自两处：侦察件里第三方实现的分类表
-// （tools/reference-trae-zcode/trae-credits.ts:classifyTraeCheckinError），以及 FMH
-// 在 TRAE 领取接口上实测出现过的业务码（1005 套餐上限、9074 签到人数过多）。
+// 领取失败的分档。时长按错误的性质定：判决不会自己变的长期停，会过期的按观察到的
+// 恢复窗口 —— 1005 是套餐上限（当天再怎么点都是同一个判决）、9074 是签到人数过多
+// （分钟级）、5xx 与答非所问是上游故障（十分钟级）。
 const (
 	claimKindCredential = "credential" // 凭据已死：自动领停到人工重新登录 / 刷新凭据
 	claimKindPlan       = "plan"       // 套餐级上限：12 小时内再怎么点都是同一个判决

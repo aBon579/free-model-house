@@ -737,7 +737,7 @@ func (s *ProbeScheduler) recheckConcurrent(
 			if ctx.Err() != nil {
 				return
 			}
-			// ⚠️ 上游只认**裸名** —— 车道前缀是我们自己加的。
+			// ⚠️ 上游只认**裸名** —— 车道前缀是 FMH 自己的命名空间。
 			_, bare := ParseModelID(target.Model)
 			rr := lane.Probe(ctx, bare)
 			// ⚠️ 存**全名**（带前缀）—— 键要唯一。
@@ -848,7 +848,7 @@ func (s *ProbeScheduler) probeOne(
 	if !ok || !l.Ready() {
 		return ProbeResult{}, probeFinal
 	}
-	// ⚠️ 上游只认**裸名** —— 车道前缀是我们自己加的。
+	// ⚠️ 上游只认**裸名** —— 车道前缀是 FMH 自己的命名空间。
 	_, bare := ParseModelID(model)
 	result := l.Probe(ctx, bare)
 	// ⚠️ 结论用**全名**（带前缀）—— 键要唯一。

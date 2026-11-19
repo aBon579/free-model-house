@@ -584,7 +584,7 @@ func ZenApplyFingerprint(body map[string]any, style ZenWireStyle) ZenFingerprint
 	//   所以这段**不是**为了过闸门，是**为了正确性**：
 	//
 	//	调用方（尤其是断流续写路径）可能留下 `none`，
-	//	那会让模型**这一轮不调工具** —— 而我们明明把工具给它了。
+	//	那会让模型**这一轮不调工具** —— 而工具本来就是要给它用的。
 	//	压制"这轮别调工具"的正确做法是在续写指令正文里写
 	//	"Do not call tools"，而不是设 `tool_choice: "none"`。
 	switch choice := body["tool_choice"].(type) {

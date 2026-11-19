@@ -82,7 +82,7 @@ func TestAutoSwitchFallsBackWhenZenBlocked(t *testing.T) {
 		t.Fatal("该回落到 OpenRouter")
 	}
 	// ⚠️ **车道收到的是裸名** —— 上游只认 `model-c`，
-	//   车道前缀（`openrouter/`）是我们自己加的。
+	//   车道前缀（`openrouter/`）只是 FMH 的命名空间。
 	if or.called()[0] != "model-c" {
 		t.Fatalf("该用 model-c，实际 %q", or.called()[0])
 	}
