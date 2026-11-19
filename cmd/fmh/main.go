@@ -420,7 +420,7 @@ func run(addr, dataDir string, logger *log.Logger) error {
 	prober.SetInterval(probeInterval(db))
 	prober.SetBatchSize(probeBatchSize(db))
 	// ⚠️ **启动时也要应用自适应开关** ——
-	//   之前只在"设置变更"钩子里设置，重启后回到调度器的默认值，
+	//   只在"设置变更"钩子里设的话，重启后会退回调度器的默认值：
 	//   用户明明关掉了自适应，重启后又被悄悄打开（"数量一会多一会少"）。
 	prober.SetAdaptiveBatch(db.GetBool(store.SettingAdaptiveProbe, false))
 	// ⚠️ **结论的面板保质期 = 探测间隔** ——
@@ -480,7 +480,7 @@ func probeInterval(db *store.DB) time.Duration {
 //
 //	每个免费模型都探一遍。
 //
-//	⚠️ 之前这里有个"每轮探几个"的上限（默认 4）——
+//	⚠️ 这里**不能**加"每轮探几个"的上限 ——
 //	   那会让"全量探测"名存实亡：
 //	   池子有 28 个模型，每轮只探 4 个 → 要 7 轮（1 小时 45 分）才轮完一圈。
 //

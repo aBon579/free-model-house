@@ -383,7 +383,7 @@ function MustChangePassword() {
  *
  *   改完密码后后端会作废所有会话，前端要**立刻**回登录页。
  *
- *   之前是"等 `useStatus` 重新请求、拿到 401、再判断没登录" ——
+ *   如果等 `useStatus` 重新请求、拿到 401 再判断没登录 ——
  *   那个过程要走**一个网络往返**，中间还会：
  *     - 闪一下旧界面
  *     - 把 401 当成错误显示出来
@@ -391,7 +391,7 @@ function MustChangePassword() {
  *
  *   症状就是"改完密码后卡住好几秒，还很诡异"。
  *
- *   现在：**改完密码立刻置 `signedOut`**，不等任何网络请求。
+ *   所以：**改完密码立刻置 `signedOut`**，不等任何网络请求。
  */
 export default function Root() {
   const [client] = useState(

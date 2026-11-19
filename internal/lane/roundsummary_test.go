@@ -42,11 +42,10 @@ func (p *probeStubLane) Do(ctx context.Context, turn *Turn, emit func(Chunk)) (*
 
 // TestRoundSummaryCountsCorrectly 验证**轮次小结的数字对**。
 //
-// ⚠️ 这是一个**真 bug** 的回归测试：
+// ⚠️ 这是一条回归线：轮次结束时如果**先清零再读取**，
 //
-//	之前的代码在轮次结束时**先清零再读取**，
-//	于是小结里永远写着"0 个模型" ——
-//	而实际探了 28 个。用户完全被误导。
+//	小结就永远写着"0 个模型"，而实际探了 28 个 ——
+//	数字看着整齐，但完全误导人。
 func TestRoundSummaryCountsCorrectly(t *testing.T) {
 	catalog := NewCatalog()
 	registry := NewRegistry()

@@ -249,7 +249,7 @@ export function Usage() {
                             <span className="text-[var(--ink-3)]">0</span>
                           )}
                         </td>
-                        {/* ⚠️ **最近调用** —— 代替了原来的"花费"列。
+                        {/* ⚠️ **最近调用** —— 这一列回答"这个模型多久没用了"。
                             后端已按 lastUsedAt 降序 —— 最新调用的永远在第一行。 */}
                         <td className="tnum px-3 py-2 text-right whitespace-nowrap text-[var(--ink-3)]">
                           {formatLastUsed(m.lastUsedAt)}

@@ -5,9 +5,8 @@
  *   那个 API 只在**安全上下文**（HTTPS 或 localhost）可用。
  *   而 FMH 是跑在 NAS 上的局域网服务，用户访问的是
  *   `http://192.168.x.x:8678` —— **HTTP，不是 HTTPS**。
- *   于是 `navigator.clipboard` 是 `undefined`，
- *   `writeText` 抛异常，而原来的代码 `catch` 里什么都不做 ——
- *   表现就是「点了复制按钮，一点反应都没有」。
+ *   于是 `navigator.clipboard` 是 `undefined`，`writeText` 抛异常 ——
+ *   复制点了却没反应，剪贴板里装的还是**上一次复制的内容**。
  *
  * ⚠️ 降级方案：`document.execCommand('copy')`。
  *   它是废弃 API，但在 HTTP 环境下**唯一**能用的。

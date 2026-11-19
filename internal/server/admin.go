@@ -1110,15 +1110,15 @@ func (a *Admin) handleSettings(w http.ResponseWriter, r *http.Request) {
 			"lanTiers":         tierLabels(),
 			"lanPerMinute":     a.db.GetInt(store.SettingLanPerMinute, defPerMin),
 			"lanMaxConcurrent": a.db.GetInt(store.SettingLanMaxConcurrent, defConc),
-			// ⚠️ 字段名从 `crossLaneFallback` 改成 `autoModelSwitch` ——
-			//   语义已经是**模型级别**的（"自动换个模型试试"），
-			//   旧名字说的是"换车道"，容易误解。
-			// ⚠️ 旧字段仍然返回（标记为已废弃），让旧前端不至于报错。
+			// ⚠️ **crossLaneFallback 是已废弃的旧字段名** ——
+			//   当前名字是 autoModelSwitch（语义是模型级的"自动换个模型试试"，
+			//   旧名字说的是"换车道"，容易误解）。
+			//   旧字段仍然返回，让旧前端不至于报错；新前端只读 autoModelSwitch。
 			"autoModelSwitch":   a.db.GetAutoModelSwitch(false),
 			"crossLaneFallback": a.db.GetAutoModelSwitch(false),
 			"probeEnabled":      a.db.GetBool(store.SettingProbeEnabled, true),
-			// ⚠️ 默认 **10 分钟**（原来是 15）。
-			//   只改默认值 —— 用户自己存过的值仍然优先。
+			// ⚠️ 默认 **10 分钟**。这里只改**默认值** ——
+			//   用户自己存过的间隔仍然优先，不能被服务端"纠正"回去。
 			"probeIntervalMin": a.db.GetInt(store.SettingProbeIntervalMin, 10),
 			// ⚠️ **没有 probeBatchSize** —— 探测是**全量**的。
 			//   每 10 分钟把每个免费模型都探一遍。

@@ -199,10 +199,10 @@ func TestProbeSchedulerCoversAllModels(t *testing.T) {
 
 // TestFullProbeIgnoresFailureBackoff 验证**关闭自适应时失败模型也每轮都探**。
 //
-// ⚠️ 之前"连续失败就少探/不探"会让每轮数量随失败情况漂移 ——
+// ⚠️ **"连续失败就少探/不探"会让每轮数量随失败情况漂移** ——
 //
-//	用户看到的是"一会多一会少"。关闭自适应 = 全量快照，
-//	失败的模型**恰恰**是最需要下一轮确认有没有恢复的。
+//	表现出来就是"一会多一会少"。关闭自适应 = 全量快照，
+//	而失败的模型**恰恰**是最需要下一轮确认有没有恢复的。
 func TestFullProbeIgnoresFailureBackoff(t *testing.T) {
 	s, l, _ := newProbeSetup(t, 10, "good", "bad")
 	// ⚠️ 用"不可用"而不是"限流" —— 避免触发限流复核的 3 秒等待。

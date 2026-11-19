@@ -1113,7 +1113,7 @@ usage 要同时认两种拼法：
 ## 5. 目录结构
 
 ```
-Free Mdel House/
+free-model-house/
 ├── README.md                     # 项目说明 + 快速开始
 ├── LICENSE                       # MIT
 ├── docker-compose.yml            # 部署入口

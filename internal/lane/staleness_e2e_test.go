@@ -43,8 +43,8 @@ func TestFreshProbeStaysAvailable(t *testing.T) {
 }
 
 // TestProbeSchedulerIntervalIsWallClock 钉住"下一轮 = 本轮开始 + 间隔"的语义。
-// 用户报的问题：设定 15 分钟、体感总超时 —— 因为之前是"跑完再等整个间隔"，
-// 一轮 80s 就把周期拉成 16 分 20 秒。
+// ⚠️ 间隔必须锚在**本轮开始时刻**，不能"跑完再等整个间隔" ——
+// 后者会让设定 15 分钟的轮次体感总超时：一轮 80s 就把周期拉成 16 分 20 秒。
 func TestProbeSchedulerIntervalIsWallClock(t *testing.T) {
 	s := NewProbeScheduler(NewCatalog(), NewRegistry(), ProbeOptions{Interval: time.Minute})
 	roundStart := time.Now()

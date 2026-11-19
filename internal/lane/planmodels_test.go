@@ -76,8 +76,8 @@ func TestPlanModelsFallsBackWhenAllUnusable(t *testing.T) {
 
 // ⚠️ **计划列表自己的开关** —— 只填槽位不算数。
 //
-// 用户要的是"默认按车道优先级切，显式打开才按我点的顺序切"。
-// 开关漏掉的话，之前填过的槽位会在打开「自动跨模型调用」时静默生效。
+// 默认行为是"按车道优先级切"，显式打开才按用户点的顺序切。
+// 没有这道开关时，早已填过的槽位会在打开「自动跨模型调用」的那一刻静默生效。
 func TestPlanModelsInertUntilEnabled(t *testing.T) {
 	router, _ := planTestRouter()
 	router.SetPlanModels([]string{"zen/c", "zen/a", "zen/b"})

@@ -9,9 +9,9 @@ import (
 
 // TestPickTargetsCoversAllModels 验证**一轮探完整个池子**。
 //
-// ⚠️ 这是用户要的：每 15 分钟**全量**探测一次。
-// 之前是"每轮取 N 个" + "10 分钟 TTL 内跳过" ——
-// 于是每轮几乎所有模型都被 TTL 跳过，探测形同虚设。
+// ⚠️ **探测是全量的** —— 每一轮把池子里每个参与自动探测的模型都探一遍。
+// 一旦改成"每轮取 N 个" + "结论 TTL 内跳过"，
+// 几乎所有模型每轮都被 TTL 跳过，探测形同虚设。
 func TestPickTargetsCoversAllModels(t *testing.T) {
 	l := &probeLane{id: "zen", fail: map[string]bool{}, state: map[string]ProbeState{}}
 	registry := NewRegistry()

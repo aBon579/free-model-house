@@ -627,7 +627,7 @@ export function useDeleteCustomKey() {
  *
  * ⚠️ **登录成功后立刻把 status 的缓存种进去** ——
  *
- * 之前登录后要**等 `/api/status` 往返**才渲染应用：
+ * 若只靠 `invalidateQueries`，渲染要等**一次 `/api/status` 往返**：
  *
  *	点登录 → /api/login (285ms，bcrypt) → invalidateQueries()
  *	→ /api/status (+220ms) → 才渲染
@@ -638,7 +638,7 @@ export function useDeleteCustomKey() {
  * 那个**失败的 query 也被缓存**了 —— `invalidateQueries`
  * 虽然会重取，但那是**一个完整的网络往返**。
  *
- * 现在：登录接口返回的 `mustChangePassword` **已经够用了**，
+ * 登录接口返回的 `mustChangePassword` **已经够用来切界面**，
  * 直接把它写进 `['status']` 缓存 → **零延迟**渲染应用。
  * 真正的 status 数据随后在后台刷新（`invalidateQueries` 照旧）。
  */

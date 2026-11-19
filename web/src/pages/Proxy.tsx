@@ -41,8 +41,8 @@ export function Proxy() {
   //
   // 开关是即点即生效的（拨了立刻保存），它永远和后端真值一致；
   // "保存"按钮管的是**信息**的修改。
-  // 之前把 enabled 也算进 dirty：关掉开关 → "保存并生效"亮起 →
-  // 用户误以为开关也要按保存才生效 —— 语义混乱的根源。
+  // 把 enabled 也算进 dirty 会误导：关掉开关 → "保存并生效"亮起 →
+  // 用户以为开关也要按保存才生效。
   const dirty = draft && proxy
     ? draft.scheme !== proxy.scheme ||
       draft.host !== proxy.host ||

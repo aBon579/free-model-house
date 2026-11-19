@@ -5,7 +5,7 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [0.1.3] — 2026-11-15
+## [0.1.3] — 2026-11-19
 
 ### 新增
 
@@ -243,6 +243,7 @@
 - 不做 HTTPS、IP 白名单、多出口代理池（见 `SECURITY.md`）
 - 免密车道的 prompt **可能被上游记录** —— 不要传敏感信息
 
+[0.1.3]: https://github.com/aBon579/free-model-house/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/aBon579/free-model-house/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/aBon579/free-model-house/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/aBon579/free-model-house/releases/tag/v0.1.0

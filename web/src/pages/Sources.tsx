@@ -53,9 +53,9 @@ export function Sources() {
   const [saved, setSaved] = useState(false)
 
   const orSecret = secrets?.secrets.find((s) => s.name === 'openrouter_api_key')
-  // ⚠️ **两条车道要用各自的状态** ——
-  // 之前 zen 卡片误用了 orLane，所以显示成"未就绪"，
-  // 而且模型数取错了。
+  // ⚠️ **两条车道各读各的状态** ——
+  // zen 卡片一旦去读 OpenRouter 的车道，它就显示成"未就绪"，
+  // 而且模型数也拿错了（那是 OR 的数）。
   // ⚠️ **`statusLanes` 不能叫 `lanes`** —— 上面已经有 `useLanes()` 的 `lanes` 了。
   //   而且 `status?.lanes` 可能是 undefined（登录后先种缓存、
   //   真实数据还在路上），所以要给空数组兜底。

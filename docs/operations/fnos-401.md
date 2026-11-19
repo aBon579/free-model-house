@@ -126,7 +126,7 @@ echo 'FMH_REGISTRY=docker.m.daocloud.io' >> .env
 在有 Docker 的机器上：
 
 ```bash
-cd "Free Mdel House"
+cd free-model-house
 docker compose build
 docker save -o fmh-image.tar free-model-house:0.1.0
 scp fmh-image.tar user@<NAS-IP>:~/

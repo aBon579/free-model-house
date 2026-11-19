@@ -70,13 +70,13 @@ var KeyTierAll = []LanTier{LanTierLight, LanTierStandard, LanTierDeep}
 
 // ParseLanTier 解析档位字符串。
 //
-// ⚠️ **旧的档位也要能读** ——
+// ⚠️ **旧档位名必须还能读** ——
 //
-//	  用户升级后数据库里还存着 "limited" / "lan"。
-//	  它们要映射到**语义最接近**的新档位，不能变成"未知"：
+//	  老数据库里存的是 "limited" / "lan"，读到它们不能变成"未知"，
+//	  要映射到语义最接近的新档位：
 //
-//		limited → light（原来是限流档）
-//		lan     → deep（原来是不限流档）
+//		limited → light（限流档）
+//		lan     → deep（不限流档）
 func ParseLanTier(s string) LanTier {
 	switch LanTier(s) {
 	case LanTierOff:

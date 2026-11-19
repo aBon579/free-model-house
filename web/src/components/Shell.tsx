@@ -51,8 +51,8 @@ interface NavItem {
 const navItems: NavItem[] = [
   { key: 'quickstart', label: '快速接入', icon: Plug, group: '接入' },
   { key: 'models', label: '模型清单', icon: Boxes, group: '运行' },
-  // ⚠️ 用量和上游源**原本都是 Activity 图标** —— 侧栏上一模一样，
-  //   根本分不出哪个是哪个。现在用量的柱状图，上游源的汇聚点。
+  // ⚠️ 侧栏上每个类目的图标要**互不相同** ——
+  //   用量和上游源共用一个图标时，一眼根本分不出哪个是哪个。
   { key: 'usage', label: '用量', icon: ChartNoAxesColumn, group: '运行' },
   // ⚠️ **日志** —— 分类运行事件（调用/探测/Key/车道/系统），
   //   每个类目可以单独开关。
@@ -74,10 +74,10 @@ const navItems: NavItem[] = [
  *   `light`  —— 强制亮色
  *   `dark`   —— 强制暗色
  *
- * ⚠️ 之前只有两档，且"跟随系统"只在**首次访问**时生效一次
- * （读 localStorage，读不到就看 matchMedia）——
- *   之后用户改了系统主题，页面**不会跟着变**。
- *   现在存的是 `system`，并监听 matchMedia 的变化。
+ * ⚠️ 三档都要**持续生效**，而不是只在首次访问判一次：
+ *   存的是偏好（`system` / `light` / `dark`），
+ *   `system` 要**监听 matchMedia 的变化** ——
+ *   只在首次访问读一次的话，用户改了系统主题，页面**不会跟着变**。
  */
 type ThemePref = 'system' | 'light' | 'dark'
 
@@ -146,7 +146,7 @@ export function Shell({
   }, [pref])
 
   // ⚠️ **跟随系统时，系统主题变了要跟着变** ——
-  //   之前只在首次访问时读一次 matchMedia，之后就不管了。
+  //   只在首次访问读一次 matchMedia 是不够的，之后系统改了就不跟了。
   useEffect(() => {
     if (pref !== 'system') return
     const mq = window.matchMedia('(prefers-color-scheme: dark)')
@@ -268,8 +268,8 @@ export function Shell({
       <div className="border-t border-[var(--sidebar-line)] px-2.5 py-2.5">
         <div className="flex items-center gap-1">
           {/* ⚠️ 三档循环：跟随系统 → 亮色 → 暗色 → 跟随系统。
-              之前只有亮/暗两档，没有"跟随系统"这个选项 ——
-              首次访问时读一次系统偏好，之后系统变了就不跟了。 */}
+              只有亮/暗两档不够 —— 那等于把"跟随系统"降级成
+              "首次访问读一次系统偏好"，之后系统变了就不跟了。 */}
           <button
             onClick={() =>
               setPref(
@@ -340,7 +340,7 @@ export function Shell({
           width: collapsed ? 'var(--sidebar-w-collapsed)' : 'var(--sidebar-w)',
           background: 'var(--sidebar)',
           // ⚠️ **侧栏右边要有明确的边界** ——
-          //   之前侧栏底色跟主内容区几乎一样（亮色主题差 1.03:1），
+          //   侧栏底色贴近主内容区（亮色主题只差 1.03:1）时，
           //   肉眼看不出哪里是侧栏、哪里是内容。
           //   加一层投影/边线，侧栏就"浮"在内容之上。
           boxShadow: 'var(--sidebar-shadow)',

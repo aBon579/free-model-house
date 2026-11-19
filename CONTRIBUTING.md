@@ -26,7 +26,7 @@
 **不需要** CGO —— SQLite 走的是纯 Go 的 WASM 实现。
 
 ```bash
-git clone <repo> && cd "Free Mdel House"
+git clone <repo> && cd free-model-house
 cd web && npm ci && npm run build
 cd .. && go build ./cmd/fmh
 ```

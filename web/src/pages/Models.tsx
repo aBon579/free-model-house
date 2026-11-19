@@ -21,8 +21,8 @@ import type { ModelInfo, ModelState } from '../api/types'
 /**
  * 状态筛选。
  *
- * ⚠️ 六个状态**全列** —— 之前只列了 4 个（漏了"地区受限"和"出口被风控"），
- *   于是用户看到这两种状态的模型却**筛不出来**。
+ * ⚠️ 六个状态**全列** —— 少列任何一个（比如"地区受限"和"出口被风控"），
+ *   面板上就会出现**筛不出来**的行。
  */
 const stateFilters: Array<{ key: ModelState | 'all'; label: string }> = [
   { key: 'all', label: '全部状态' },
@@ -188,7 +188,7 @@ export function Models() {
         title="模型清单"
         actions={
           <div className="flex items-center gap-2">
-            {/* ⚠️ **上次探测时间** —— 代替了原来的「45 / 45」。
+            {/* ⚠️ 这里显示**上次探测时间**，不是"探了几个"的计数。
 
                 用户在这里最想知道的是"这些结论是什么时候测的" ——
                 结论的 TTL 是 10 分钟，过期了就没意义了。

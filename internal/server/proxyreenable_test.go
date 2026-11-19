@@ -11,9 +11,10 @@ import (
 	"github.com/aBon579/free-model-house/internal/store"
 )
 
-// TestProxyTestDoesNotReenableProxy 复现用户报的 bug：
+// TestProxyTestDoesNotReenableProxy 钉住"检测出口不改开关"：
 //
-//	手动关掉代理 → 点"检测出口" → 代理自己变回 enabled=true。
+//	手动关掉代理 → 点"检测出口" → 代理**必须仍是关的**。
+//	检测只是"看一眼从哪儿出去"，它不参与开/关决策。
 //
 // 排查思路：把整个链路在内存里跑一遍，
 // 检测前后各读一次数据库里的 proxy_config —— 被动了就是后端的锅。
