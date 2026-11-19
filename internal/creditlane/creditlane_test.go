@@ -320,8 +320,8 @@ func TestQoderStreamTextReasoningToolAndUsage(t *testing.T) {
 
 func TestQoderQueuedErrorReadsNestedCodeNotTopLevel(t *testing.T) {
 	// 实测形状：顶层 code 是 403，业务码 10605 在 message 里**又套一层 JSON 串**。
-	// 参考实现第一版写成 `if (data.code === '10605')` —— 拿 403 比 10605 必然不命中，
-	// 排队于是被归成"可重试的 5xx"，客户端按 500…8000ms 连打五次（约 15.5 秒），
+	// 若拿顶层 `code` 去比 `'10605'`（顶层其实是 403）必然不命中，排队会被归成
+	// "可重试的 5xx"，客户端按 500…8000ms 连打五次（约 15.5 秒），
 	// 而服务端要等 30 秒：**永远等不到**，只白烧了整轮预算。
 	queued := qoderError(`{"code":"10605","message":` +
 		strconv.Quote(`{"isQueued":true,"queueCount":3,"retryAfterSeconds":30}`) + `}`)

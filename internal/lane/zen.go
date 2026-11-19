@@ -121,7 +121,7 @@ func (z *ZenLane) Probe(ctx context.Context, model string) ProbeResult {
 //
 // ⚠️ **`max_tokens` 不能太小** ——
 //
-// 这是实测踩过的坑：原来用 16，某个模型把 16 个 token
+// 16 不够：某个模型会把 16 个 token
 // **全烧在 reasoning 上**，一个可见 token 都没吐，
 // 于是撞上 `max_tokens` 截断（finish = max-tokens）。
 //
@@ -232,7 +232,7 @@ var FallbackCatalogIDs = []string{
 //
 //	「上游源」页面的"模型数"取自 `Status().ModelCount`，
 //	而那个字段**只在成功拉取时**被设置。
-//	兜底路径原来漏了设置 → 上游一挂，页面显示"模型数 0"，
+//	兜底路径一旦漏设 → 上游一挂，页面显示"模型数 0"，
 //	但清单里明明有 10 个模型 —— 自相矛盾。
 func fallbackCatalog() []ModelInfo {
 	out := make([]ModelInfo, 0, len(FallbackCatalogIDs))

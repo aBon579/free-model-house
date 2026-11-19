@@ -872,7 +872,7 @@ func (s *ProbeScheduler) probeOne(
 //
 //	false = 手动单探（ProbeOne）—— 不计入轮次统计，
 //	否则"共探测 N 个"会混进不在这一轮里的模型，而且跨轮累加，
-//	面板上的数字越滚越大却对不上任何一轮（实测踩过）。
+//	面板上的数字越滚越大却对不上任何一轮。
 func (s *ProbeScheduler) finishProbe(result ProbeResult, inRound bool) {
 	if result.Model == "" {
 		return
@@ -970,7 +970,7 @@ func (s *ProbeScheduler) ProbeOne(ctx context.Context, model string) ProbeResult
 	result.Model = model
 
 	// ⚠️ **不计入轮次统计** —— 手动单探不是批量轮的一部分，
-	//   混进去会让"共探测 N 个"跨轮累加（实测踩过）。
+	//   混进去会让"共探测 N 个"跨轮累加。
 	s.finishProbe(result, false)
 	return result
 }

@@ -111,7 +111,7 @@ func TestTierLimits(t *testing.T) {
 
 // TestLimiterStartsFull 验证令牌桶**初始是满的**。
 //
-// ⚠️ 这是实测踩过的坑：桶初始 tokens=0 时，
+// ⚠️ 这个判决容易被写错：桶初始 tokens=0 时，
 //
 //	刚切到限流档时第一个请求就被拒（429），
 //	用户看到的是"刚设置就 429"。

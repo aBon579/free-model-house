@@ -15,7 +15,7 @@ func newTestHTTPClient() *http.Client {
 //
 // ⚠️ 「上游源」页面的"模型数"取自 `Status().ModelCount`，
 // 而那个字段只在**成功拉取**时被设置。
-// 兜底路径漏了设置 → 上游一挂，页面显示"模型数 0"
+// 兜底路径一旦漏设 → 上游一挂，页面显示"模型数 0"
 // 但清单里有 10 个模型 —— 自相矛盾。
 func TestZenFallbackSetsModelCount(t *testing.T) {
 	z := &ZenLane{

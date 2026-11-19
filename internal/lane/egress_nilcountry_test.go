@@ -9,7 +9,7 @@ import (
 
 // TestProbeEchoNilCountryNoCrash 验证**回显源没配 country 函数时不会崩**。
 //
-// ⚠️ 这是实测踩过的崩溃：ipify 那条只写了 ip 函数，
+// ⚠️ 回显源只配了 ip 函数时（ipify 那条就是这样）：
 //
 //	探通后 `echo.country(doc)` 调到 nil → SIGSEGV → 进程整个挂掉。
 //	当时的表现是：一开代理，几秒后容器反复重启。

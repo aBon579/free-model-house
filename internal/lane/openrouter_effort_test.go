@@ -26,7 +26,7 @@ func newOREffortLane(efforts map[string][]string, mandatory map[string]bool) *Op
 }
 
 // TestOREffortMandatoryCannotDisable 验证**强制思考的模型不能关掉思考**。
-// ⚠️ 这是实测踩过的坑 ——
+// ⚠️ 实测判决 ——
 //
 //	发 `reasoning.enabled: false` 会得到 **400**。
 //	所以"关掉思考"要**降级成最低档位**。

@@ -163,7 +163,7 @@ func TestProbeStateNegative(t *testing.T) {
 
 // TestProbeMaxTokens 验证探测的输出预算**够模型吐出答案**。
 //
-// ⚠️ 实测踩过的坑：原来用 16，模型把 16 个 token 全烧在 reasoning 上，
+// ⚠️ 16 不够：模型会把 16 个 token 全烧在 reasoning 上，
 //
 //	一个可见 token 都没吐 → finish=max-tokens。
 //	那样探测根本测不到"能不能出答案"，首字延迟也会被算成整个请求的耗时。
