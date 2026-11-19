@@ -34,18 +34,15 @@
   提前选好，之后打开回落直接生效。
   ⚠️ 生效的槽位是**逐个点名**的显式授权，压过车道规则（点名要落进 credit 池也算）。
 - **余额查询主动补一发** —— 进 Credit 页或切渠道时自动查一次余额，不用手点。
-- **部署包瘦成"离线运行最小集"** —— 部署包清单只留 `Dockerfile.offline` 真正 COPY 的
-  那 5 样（`dist/out/fmh`、`dist/ca-certificates.crt`、`dist/zoneinfo/`、`dist/passwd`、
-  `dist/group`）加 `Dockerfile.offline` 及其专用 ignore、指向它的 `docker-compose.yml`、
-  `.env.example`、README/LICENSE 和两篇运维文档；源码、`vendor/`、在线 `Dockerfile`、
-  打包脚本都不再进包（实测 36.7 MB / 1513 文件 → 17.1 MB / 610 文件）。
-  要改代码重编走 `git clone`。
+- **离线部署包瘦成"运行最小集"** —— 包里只留镜像真正要用的东西：可执行文件、证书与
+  时区数据，加上构建它所需的 compose / `.env.example` 和文档；源码、`vendor/` 与在线
+  构建路径都不再进包，体积和文件数都掉了一半以上。要改代码重编走 `git clone`。
   顺带堵掉两个坑：① 仓库那份 `.dockerignore` 写死了 `/dist` 排除，而旧版（非 BuildKit）builder
   只认这一份 ignore —— 它跟着进包会让离线构建的 `COPY dist/` 落空，所以必须不在包里；
   ② 打包顺带拷进 `dist/web/dist/` 的那 8 个文件从没进过镜像 —— 界面是 `go:embed` 编译时
   打进 `out/fmh` 的，容器里没有第二份，留着只会让人以为部署还得单独摆一份前端。
   `docs/operations/nas-deploy.md` 里"上传整个文件夹 + `vendor/` 供离线构建"那段本来就和
-  包内 compose 指向 `Dockerfile.offline` 自相矛盾，改成 A 克隆 / B 部署包 / C 现成镜像三条路。
+  包内 compose 的离线构建自相矛盾，改成 A 克隆 / B 部署包 / C 现成镜像三条路。
 
 ### 变更
 
